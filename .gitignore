@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+.env
+!.env.example
+
+# uv / pdm
+.uv-cache/
+.pdm-python
+__pypackages__/
+
+# Testing / linting
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+*.cover
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+docker-compose.override.yml
+
+# Application runtime
+logs/
+*.log
+models/                # sentence-transformers cache volume
+local_data/
+
+# Alembic — keep versions but ignore any local dump
+migrations/_local/
+
+# Secrets
+*.pem
+*.key
+secrets/

@@ -1,0 +1,104 @@
+name: poi-lake
+
+services:
+  postgres:
+    build:
+      context: ./docker/postgres
+    image: poi-lake/postgres:16-postgis-pgvector
+    container_name: poi-lake-postgres
+    environment:
+      POSTGRES_DB: poi_lake
+      POSTGRES_USER: poi
+      POSTGRES_PASSWORD: poi
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poi -d poi_lake"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: poi-lake-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # gosom google-maps-scraper as a sidecar (REST mode).
+  # Image: gosom/google-maps-scraper  (see https://github.com/gosom/google-maps-scraper)
+  gosom-scraper:
+    image: gosom/google-maps-scraper:latest
+    container_name: poi-lake-gosom
+    command: ["-web", "-addr", "0.0.0.0:8080"]
+    ports:
+      - "8090:8080"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: poi-lake/api:dev
+    container_name: poi-lake-api
+    env_file:
+      - .env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
+      REDIS_URL: redis://redis:6379/0
+      GOSOM_SCRAPER_URL: http://gosom-scraper:8080
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src:ro
+      - ./migrations:/app/migrations:ro
+      - ./scripts:/app/scripts:ro
+      - model_cache:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+      dockerfile: docker/admin/Dockerfile
+    image: poi-lake/admin:dev
+    container_name: poi-lake-admin
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
+      POI_LAKE_API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  model_cache:

@@ -1,0 +1,9 @@
+Alembic migration scripts.
+
+Run from the repo root:
+    alembic upgrade head       # apply all migrations
+    alembic downgrade -1       # revert the last migration
+    alembic revision -m "..."  # create a new empty migration
+    alembic current            # show current revision
+
+The DATABASE_URL is sourced from poi_lake.config.Settings (i.e. .env).
