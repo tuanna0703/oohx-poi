@@ -69,3 +69,4 @@ migrations/_local/
 *.pem
 *.key
 secrets/
+docker-build.log
