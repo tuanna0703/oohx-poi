@@ -38,6 +38,13 @@ def run_ingestion_job(job_id: int) -> None:
 
 
 async def _run(job_id: int) -> dict[str, int]:
-    async with session_scope() as session:
-        svc = IngestionService(session)
-        return await svc.run_job(job_id)
+    from poi_lake.db import get_engine, get_sessionmaker
+    try:
+        async with session_scope() as session:
+            svc = IngestionService(session)
+            return await svc.run_job(job_id)
+    finally:
+        engine = get_engine()
+        await engine.dispose()
+        get_engine.cache_clear()
+        get_sessionmaker.cache_clear()

@@ -62,13 +62,14 @@ class IngestionService:
                 async for record in self._iter_records(adapter, job):
                     stats["fetched"] += 1
                     try:
-                        inserted = await self._insert_raw(record, source.id, job.id)
+                        new_id = await self._insert_raw(record, source.id, job.id)
                     except SQLAlchemyError as exc:
                         logger.exception("raw_pois insert failed: %s", exc)
                         stats["errors"] += 1
                         continue
-                    if inserted:
+                    if new_id is not None:
                         stats["new"] += 1
+                        self._enqueue_normalize(new_id)
                     else:
                         stats["duplicate"] += 1
         except AdapterTransientError as exc:
@@ -126,10 +127,10 @@ class IngestionService:
 
     async def _insert_raw(
         self, record: RawPOIRecord, source_id: int, job_id: int
-    ) -> bool:
+    ) -> int | None:
         """Insert a raw_poi row, skipping if (source_id, source_poi_id, hash) exists.
 
-        Returns True if a row was inserted, False if it was a duplicate.
+        Returns the new ``raw_pois.id`` on insert; ``None`` on duplicate.
         """
         digest = content_hash(record.raw_payload)
         location_wkt: str | None = None
@@ -152,8 +153,24 @@ class IngestionService:
             .returning(RawPOI.id)
         )
         result = await self.session.execute(stmt)
-        inserted_id = result.scalar_one_or_none()
-        return inserted_id is not None
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _enqueue_normalize(raw_poi_id: int) -> None:
+        """Dispatch a Dramatiq message to normalize this raw_poi.
+
+        Imported lazily so the IngestionService stays usable from contexts
+        (CLI scripts, alembic) that haven't configured the broker yet.
+        """
+        try:
+            from poi_lake.workers.normalize import run_normalize_raw_poi
+
+            run_normalize_raw_poi.send(raw_poi_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "could not enqueue normalize for raw_poi %d: %s — will be picked up by backfill",
+                raw_poi_id, exc,
+            )
 
     # ---------------------------------------------------------------- state
 

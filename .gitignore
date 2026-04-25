@@ -70,3 +70,4 @@ migrations/_local/
 *.key
 secrets/
 docker-build.log
+.claude/

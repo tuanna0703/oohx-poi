@@ -90,7 +90,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
       REDIS_URL: redis://redis:6379/0
       GOSOM_SCRAPER_URL: http://gosom-scraper:8080
-    command: ["dramatiq", "poi_lake.workers", "--processes", "1", "--threads", "4"]
+    # Threads share the cached async engine, but asyncpg connections aren't
+    # safe to use from multiple event loops. Run 1 thread/process and scale
+    # with --processes when throughput matters.
+    command: ["dramatiq", "poi_lake.workers", "--processes", "2", "--threads", "1", "--queues", "ingest", "normalize"]
     volumes:
       - ./src:/app/src:ro
       - model_cache:/app/models
