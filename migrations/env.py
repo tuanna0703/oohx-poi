@@ -15,9 +15,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from poi_lake.config import get_settings
 from poi_lake.db.base import Base
-
-# Import side-effect modules here once ORM models exist (Phase 2+)
-# so autogenerate can see them. For Phase 1 the migration is hand-written.
+from poi_lake.db import models  # noqa: F401 — register all ORM models on Base.metadata
 
 config = context.config
 if config.config_file_name is not None:

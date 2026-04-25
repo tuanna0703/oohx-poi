@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from poi_lake import __version__
+from poi_lake.api.v1 import api_v1_router
 from poi_lake.config import get_settings
 from poi_lake.db import get_engine
 
@@ -37,6 +38,7 @@ app = FastAPI(
     description="Multi-source POI ingestion + AI dedup/normalization + curated REST API.",
     lifespan=lifespan,
 )
+app.include_router(api_v1_router)
 
 
 @app.get("/health", tags=["health"])

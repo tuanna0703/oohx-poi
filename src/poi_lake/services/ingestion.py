@@ -1,0 +1,186 @@
+"""IngestionService — load source, run adapter, persist raw_pois.
+
+Job lifecycle:
+    pending --> running --> completed | failed
+
+Job types supported in Phase 2:
+  * ``area_sweep``     params: {lat, lng, radius_m, category?}
+  * ``category_search`` params: same as area_sweep, category required
+  * ``detail_enrich``  params: {source_poi_ids: [...]}
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from poi_lake.adapters import (
+    AdapterError,
+    AdapterTransientError,
+    RawPOIRecord,
+    SourceAdapter,
+    build_adapter_for_source,
+)
+from poi_lake.db.models import IngestionJob, IngestionJobStatus, RawPOI, Source
+from poi_lake.services.hashing import content_hash
+
+logger = logging.getLogger(__name__)
+
+
+class IngestionService:
+    """Drives one ingestion job from start to finish."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def run_job(self, job_id: int) -> dict[str, int]:
+        """Execute the job identified by ``job_id``.
+
+        Returns the stats dict (also persisted on the job row).
+        Raises only for unrecoverable bugs — adapter errors are recorded
+        on the job row and re-raised as :class:`AdapterError` so workers
+        can decide whether to retry.
+        """
+        job = await self._load_job(job_id)
+        source = await self._load_source(job.source_id)
+        if not source.enabled:
+            await self._fail(job, f"source {source.code!r} is disabled")
+            raise AdapterError(f"source {source.code!r} is disabled")
+
+        await self._mark_running(job)
+        adapter = build_adapter_for_source(source)
+        stats = {"fetched": 0, "new": 0, "duplicate": 0, "errors": 0}
+
+        try:
+            async with adapter:
+                async for record in self._iter_records(adapter, job):
+                    stats["fetched"] += 1
+                    try:
+                        inserted = await self._insert_raw(record, source.id, job.id)
+                    except SQLAlchemyError as exc:
+                        logger.exception("raw_pois insert failed: %s", exc)
+                        stats["errors"] += 1
+                        continue
+                    if inserted:
+                        stats["new"] += 1
+                    else:
+                        stats["duplicate"] += 1
+        except AdapterTransientError as exc:
+            await self._fail(job, f"transient: {exc}", stats)
+            raise
+        except AdapterError as exc:
+            await self._fail(job, str(exc), stats)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await self._fail(job, f"unexpected: {exc!r}", stats)
+            raise
+
+        await self._mark_completed(job, stats)
+        return stats
+
+    # ----------------------------------------------------------------- helpers
+
+    async def _load_job(self, job_id: int) -> IngestionJob:
+        job = await self.session.get(IngestionJob, job_id)
+        if job is None:
+            raise AdapterError(f"ingestion_job id={job_id} not found")
+        return job
+
+    async def _load_source(self, source_id: int) -> Source:
+        source = await self.session.get(Source, source_id)
+        if source is None:
+            raise AdapterError(f"source id={source_id} not found")
+        return source
+
+    async def _iter_records(
+        self, adapter: SourceAdapter, job: IngestionJob
+    ):
+        params = job.params or {}
+        if job.job_type in ("area_sweep", "category_search"):
+            try:
+                lat = float(params["lat"])
+                lng = float(params["lng"])
+                radius_m = int(params["radius_m"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise AdapterError(f"missing/invalid area params: {exc}") from exc
+            category = params.get("category")
+            async for record in adapter.fetch_by_area(lat, lng, radius_m, category):
+                yield record
+            return
+
+        if job.job_type == "detail_enrich":
+            ids = params.get("source_poi_ids") or []
+            for spid in ids:
+                rec = await adapter.fetch_by_id(str(spid))
+                if rec is not None:
+                    yield rec
+            return
+
+        raise AdapterError(f"unsupported job_type {job.job_type!r}")
+
+    async def _insert_raw(
+        self, record: RawPOIRecord, source_id: int, job_id: int
+    ) -> bool:
+        """Insert a raw_poi row, skipping if (source_id, source_poi_id, hash) exists.
+
+        Returns True if a row was inserted, False if it was a duplicate.
+        """
+        digest = content_hash(record.raw_payload)
+        location_wkt: str | None = None
+        if record.location is not None:
+            lat, lng = record.location
+            # SRID 4326 longitude-then-latitude in WKT
+            location_wkt = f"SRID=4326;POINT({lng} {lat})"
+
+        stmt = (
+            pg_insert(RawPOI)
+            .values(
+                source_id=source_id,
+                source_poi_id=record.source_poi_id,
+                raw_payload=record.raw_payload,
+                content_hash=digest,
+                location=location_wkt,
+                ingestion_job_id=job_id,
+            )
+            .on_conflict_do_nothing(constraint="uq_raw_pois_source_id_hash")
+            .returning(RawPOI.id)
+        )
+        result = await self.session.execute(stmt)
+        inserted_id = result.scalar_one_or_none()
+        return inserted_id is not None
+
+    # ---------------------------------------------------------------- state
+
+    async def _mark_running(self, job: IngestionJob) -> None:
+        job.status = IngestionJobStatus.RUNNING.value
+        job.started_at = datetime.now(timezone.utc)
+        await self.session.commit()
+
+    async def _mark_completed(self, job: IngestionJob, stats: dict[str, int]) -> None:
+        job.status = IngestionJobStatus.COMPLETED.value
+        job.completed_at = datetime.now(timezone.utc)
+        job.stats = stats
+        await self.session.commit()
+
+    async def _fail(
+        self, job: IngestionJob, reason: str, stats: dict[str, int] | None = None
+    ) -> None:
+        # Roll back any pending insert state, then re-fetch the job in the
+        # clean transaction and mutate via ORM. Direct attribute assignment
+        # plus session.commit() is the path with the cleanest interaction
+        # between AsyncSession + asyncpg + JSONB.
+        await self.session.rollback()
+        fresh = await self.session.get(IngestionJob, job.id)
+        if fresh is None:
+            return
+        fresh.status = IngestionJobStatus.FAILED.value
+        fresh.completed_at = datetime.now(timezone.utc)
+        fresh.error_message = reason[:2000]
+        fresh.stats = stats or {}
+        await self.session.commit()

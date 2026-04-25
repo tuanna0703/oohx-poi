@@ -33,7 +33,11 @@ def get_engine() -> AsyncEngine:
         echo=settings.database_echo,
         pool_size=settings.database_pool_size,
         max_overflow=settings.database_max_overflow,
-        pool_pre_ping=True,
+        # pool_pre_ping=True is intentionally OFF: asyncpg's connections raise
+        # cleanly on broken sockets so we'd just be paying the ping cost on
+        # every checkout. SQLAlchemy's sync ping path also fights with the
+        # greenlet bridge under some test scenarios.
+        pool_recycle=300,  # recycle every 5 min instead — cheap and effective
     )
 
 

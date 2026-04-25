@@ -64,6 +64,8 @@ services:
       - ./src:/app/src:ro
       - ./migrations:/app/migrations:ro
       - ./scripts:/app/scripts:ro
+      - ./tests:/app/tests:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
       - model_cache:/app/models
     depends_on:
       postgres:
@@ -76,6 +78,27 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    image: poi-lake/api:dev          # same image as api — different command
+    container_name: poi-lake-worker
+    env_file:
+      - .env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
+      REDIS_URL: redis://redis:6379/0
+      GOSOM_SCRAPER_URL: http://gosom-scraper:8080
+    command: ["dramatiq", "poi_lake.workers", "--processes", "1", "--threads", "4"]
+    volumes:
+      - ./src:/app/src:ro
+      - model_cache:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   admin:

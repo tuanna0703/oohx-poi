@@ -24,7 +24,7 @@ RUN pip install --prefix=/install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cpu \
         "torch==2.5.1" \
     && PYTHONPATH=/install/lib/python3.12/site-packages \
-       pip install --prefix=/install --no-cache-dir .
+       pip install --prefix=/install --no-cache-dir ".[dev]"
 
 # ---------- Runtime stage ----------
 FROM python:3.12-slim-bookworm AS runtime
