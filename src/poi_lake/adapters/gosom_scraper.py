@@ -88,7 +88,7 @@ class GosomScraperAdapter(SourceAdapter):
         radius_m: int,
         category: str | None = None,
     ) -> AsyncIterator[RawPOIRecord]:
-        keywords = [category] if category else self._default_keywords()
+        keywords = self._keywords_for(category)
         zoom = self._zoom_for_radius(radius_m)
 
         job_id = await self._submit_job(
@@ -123,6 +123,32 @@ class GosomScraperAdapter(SourceAdapter):
     def _default_keywords() -> list[str]:
         # When the IngestionService doesn't pass a category, do a broad VN sweep.
         return ["restaurant", "cafe", "convenience store", "shop"]
+
+    @staticmethod
+    def _keywords_for(category: str | None) -> list[str]:
+        """Resolve ``category`` into the keywords gosom should search for.
+
+        Three input shapes are supported:
+          1. ``None``                    → broad default sweep.
+          2. OpenOOH code (e.g. ``retail.convenience_stores``)
+                                         → translated to a curated list of
+                                           Vietnamese + English search terms.
+          3. Free text                  → passed through verbatim (one keyword).
+
+        OpenOOH codes always have a "." or are a known level-1 (``retail``,
+        ``hospitality`` …); free-text categories like ``"circle k"`` aren't
+        and fall through to the verbatim path.
+        """
+        from poi_lake.pipeline.normalize.openooh_keywords import (
+            is_openooh_code,
+            keywords_for_openooh,
+        )
+
+        if not category:
+            return GosomScraperAdapter._default_keywords()
+        if is_openooh_code(category):
+            return keywords_for_openooh(category)
+        return [category]
 
     @staticmethod
     def _zoom_for_radius(radius_m: int) -> int:
