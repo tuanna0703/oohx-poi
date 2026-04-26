@@ -12,12 +12,16 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from datetime import datetime as _dt
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.db.models import (
+    APIClient,
     IngestionJob,
     IngestionJobStatus,
     Source,
@@ -28,6 +32,7 @@ from poi_lake.schemas import (
     IngestionJobsList,
     SourceOut,
 )
+from poi_lake.services.api_keys import generate_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +137,86 @@ async def get_ingestion_job(
         raise HTTPException(404, f"ingestion_job {job_id} not found")
     job, code = row
     return _to_out(job, code)
+
+
+# ----------------------------------------------------------------- api_clients
+
+
+class APIClientOut(BaseModel):
+    id: int
+    name: str
+    permissions: list[str]
+    rate_limit_per_minute: int
+    enabled: bool
+    created_at: _dt
+
+
+class APIClientCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    permissions: list[str] = Field(default_factory=lambda: ["read:master"])
+    rate_limit_per_minute: int = Field(default=1000, ge=1, le=100_000)
+
+
+class APIClientCreated(APIClientOut):
+    api_key: str  # plaintext, shown ONCE
+
+
+@router.get("/api-clients", response_model=list[APIClientOut])
+async def list_api_clients(session: AsyncSession = Depends(get_session)) -> list[APIClient]:
+    rows = (
+        await session.execute(select(APIClient).order_by(APIClient.id))
+    ).scalars().all()
+    return [
+        APIClientOut(
+            id=r.id,
+            name=r.name,
+            permissions=list(r.permissions or []),
+            rate_limit_per_minute=r.rate_limit_per_minute,
+            enabled=r.enabled,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+
+
+@router.post(
+    "/api-clients",
+    response_model=APIClientCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_api_client(
+    payload: APIClientCreate,
+    session: AsyncSession = Depends(get_session),
+) -> APIClientCreated:
+    """Create an API client and return the plaintext key. Show once, never again."""
+    existing = (
+        await session.execute(select(APIClient).where(APIClient.name == payload.name))
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(409, f"api client {payload.name!r} already exists")
+
+    key = generate_api_key()
+    client = APIClient(
+        name=payload.name,
+        api_key_hash=key.hash,
+        permissions=payload.permissions,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        enabled=True,
+    )
+    session.add(client)
+    await session.commit()
+    await session.refresh(client)
+    logger.info("created api_client name=%s id=%d", payload.name, client.id)
+
+    return APIClientCreated(
+        id=client.id,
+        name=client.name,
+        permissions=list(client.permissions or []),
+        rate_limit_per_minute=client.rate_limit_per_minute,
+        enabled=client.enabled,
+        created_at=client.created_at,
+        api_key=key.plaintext,
+    )
 
 
 def _to_out(job: IngestionJob, source_code: str) -> IngestionJobOut:
