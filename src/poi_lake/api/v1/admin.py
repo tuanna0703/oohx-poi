@@ -112,6 +112,119 @@ async def list_ingestion_jobs(
     return IngestionJobsList(items=items, total=total)
 
 
+class TiledJobRequest(BaseModel):
+    """Tile a bounding box into ``cell_size_m`` × ``cell_size_m`` cells and
+    submit one ingestion job per cell. Useful for area sweeps that exceed
+    a single source's per-query result cap (gosom is ~30-40 / keyword)."""
+
+    source_code: str = Field(min_length=1)
+    bbox: list[float] = Field(
+        min_length=4, max_length=4,
+        description="[lng_min, lat_min, lng_max, lat_max]",
+    )
+    cell_size_m: int = Field(default=5000, ge=200, le=20000)
+    category: str | None = None
+    max_jobs: int = Field(default=50, ge=1, le=500)
+
+
+def _grid_centers(
+    bbox: list[float], cell_size_m: int
+) -> list[tuple[float, float]]:
+    """Return (lat, lng) centres of a regular grid covering ``bbox``.
+
+    Always emits at least one centre. When ``cell_size_m`` exceeds the bbox
+    on a given axis, the axis collapses to a single row/column centred on
+    the bbox midpoint — so a tiny bbox always gets a reasonable single
+    centre instead of an empty grid.
+    """
+    import math
+
+    lng_min, lat_min, lng_max, lat_max = bbox
+    if not (lng_min < lng_max and lat_min < lat_max):
+        raise ValueError("bbox must be [lng_min, lat_min, lng_max, lat_max]")
+
+    avg_lat_rad = math.radians((lat_min + lat_max) / 2.0)
+    cell_lat_deg = cell_size_m / 111_000.0
+    cos_lat = max(math.cos(avg_lat_rad), 0.05)
+    cell_lng_deg = cell_size_m / (111_000.0 * cos_lat)
+
+    n_lat = max(1, math.ceil((lat_max - lat_min) / cell_lat_deg))
+    n_lng = max(1, math.ceil((lng_max - lng_min) / cell_lng_deg))
+    step_lat = (lat_max - lat_min) / n_lat
+    step_lng = (lng_max - lng_min) / n_lng
+
+    centers: list[tuple[float, float]] = []
+    for i in range(n_lat):
+        lat = lat_min + step_lat * (i + 0.5)
+        for j in range(n_lng):
+            lng = lng_min + step_lng * (j + 0.5)
+            centers.append((round(lat, 6), round(lng, 6)))
+    return centers
+
+
+@router.post(
+    "/ingestion-jobs/tiled",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_tiled_ingestion_jobs(
+    payload: TiledJobRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Submit one ``area_sweep`` job per grid cell over ``bbox``.
+
+    Cell radius is half the cell side, which gives a small overlap between
+    neighbouring cells — that's what we want for dedupe to fold near-edge
+    duplicates instead of leaving them as parallel masters.
+    """
+    src = (
+        await session.execute(select(Source).where(Source.code == payload.source_code))
+    ).scalar_one_or_none()
+    if src is None:
+        raise HTTPException(404, f"source {payload.source_code!r} not found")
+    if not src.enabled:
+        raise HTTPException(409, f"source {payload.source_code!r} is disabled")
+
+    centers = _grid_centers(payload.bbox, payload.cell_size_m)
+    if not centers:
+        raise HTTPException(400, "bbox produced zero cells — check coordinate order")
+    if len(centers) > payload.max_jobs:
+        raise HTTPException(
+            400,
+            f"would create {len(centers)} jobs (cap max_jobs={payload.max_jobs}); "
+            f"raise the cap or use a larger cell_size_m",
+        )
+
+    radius = payload.cell_size_m // 2
+    from poi_lake.workers.ingest import run_ingestion_job
+
+    job_ids: list[int] = []
+    for lat, lng in centers:
+        params: dict[str, object] = {"lat": lat, "lng": lng, "radius_m": radius}
+        if payload.category:
+            params["category"] = payload.category
+        job = IngestionJob(
+            source_id=src.id,
+            job_type="area_sweep",
+            params=params,
+            status=IngestionJobStatus.PENDING.value,
+            stats={},
+        )
+        session.add(job)
+        await session.flush()
+        job_ids.append(job.id)
+    await session.commit()
+
+    # Dispatch after commit so workers see the rows.
+    for jid in job_ids:
+        run_ingestion_job.send(jid)
+
+    logger.info(
+        "tiled-ingest: %d jobs queued source=%s cells=%d radius=%dm category=%s",
+        len(job_ids), payload.source_code, len(centers), radius, payload.category,
+    )
+    return {"job_ids": job_ids, "count": len(job_ids), "cell_radius_m": radius}
+
+
 @router.post("/dedupe/run", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_dedupe() -> dict[str, str]:
     """Enqueue a dedupe pass. The worker handles all currently-pending rows."""
