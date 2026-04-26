@@ -234,65 +234,84 @@ _GOSOM_CATEGORY_MAP: tuple[tuple[str, tuple[str, str | None]], ...] = (
 # --- name-based fallback ---------------------------------------------------
 # When a source returns an empty / unknown ``raw_category`` (gosom CSV often
 # does this for non-business places like schools and government offices), we
-# can still infer the category from the canonical name. The keys are accent-
-# folded substrings so we can match either Vietnamese-with-diacritics or
-# romanized inputs.
+# infer the category from the canonical name. Keys are accent-folded.
+#
+# **Rule ordering matters.** A Vietnamese place name almost always starts
+# with the place type ("Bệnh viện X", "Trường ABC", "Khách sạn Y"), and the
+# place type beats any institution mentioned later in the same string.
+# Concretely: ``Bệnh viện Đại học Y Hà Nội`` is the *hospital* attached to
+# Hanoi Medical University, not the university itself. So strong place-type
+# prefixes (``benh vien``, ``phong kham``, ``khach san`` …) must be matched
+# *before* the broader institution markers (``dai hoc``, ``truong``).
+#
+# Three groups, in match priority:
+#   1. Place-type prefixes — when present, they always win.
+#   2. Education markers — only if no place-type fired.
+#   3. Generic / weaker fallbacks.
 _NAME_INFERENCE_RULES: tuple[tuple[str, CategoryResult], ...] = (
-    # Education (must come before generic fallback patterns)
-    ("truong dai hoc", ("education", "education.colleges_universities")),
-    ("dai hoc", ("education", "education.colleges_universities")),
-    ("hoc vien", ("education", "education.colleges_universities")),
-    ("university", ("education", "education.colleges_universities")),
-    ("college", ("education", "education.colleges_universities")),
-    ("truong thpt", ("education", "education.schools")),
-    ("truong thcs", ("education", "education.schools")),
-    ("truong tieu hoc", ("education", "education.schools")),
-    ("high school", ("education", "education.schools")),
-    ("primary school", ("education", "education.schools")),
-    ("truong mam non", ("education", "education.early_learning")),
-    ("truong mn", ("education", "education.early_learning")),
-    ("kindergarten", ("education", "education.early_learning")),
-    ("preschool", ("education", "education.early_learning")),
-    ("truong", ("education", "education.schools")),  # generic ``Trường …``
-    ("school", ("education", "education.schools")),
+    # ---- 1. Strong place-type prefixes -----------------------------------
     # Point of care
     ("benh vien", ("point_of_care", "point_of_care.hospitals")),
     ("hospital", ("point_of_care", "point_of_care.hospitals")),
     ("phong kham", ("point_of_care", "point_of_care.doctor_offices")),
     ("clinic", ("point_of_care", "point_of_care.doctor_offices")),
-    ("nha thuoc", ("retail", "retail.pharmacy")),
     ("nha si", ("point_of_care", "point_of_care.dentist_offices")),
+    ("nha thuoc", ("retail", "retail.pharmacy")),
+    ("hieu thuoc", ("retail", "retail.pharmacy")),
     # Financial
     ("ngan hang", ("financial", "financial.banks")),
-    # Hospitality / coffee
-    ("ca phe", ("hospitality", "hospitality.cafes")),
-    ("cafe", ("hospitality", "hospitality.cafes")),
-    ("nha hang", ("hospitality", "hospitality.restaurants")),
-    ("restaurant", ("hospitality", "hospitality.restaurants")),
-    ("quan an", ("hospitality", "hospitality.restaurants")),
     # Travel
     ("khach san", ("travel", "travel.hotels")),
     ("hotel", ("travel", "travel.hotels")),
+    # Hospitality (food / drink)
+    ("nha hang", ("hospitality", "hospitality.restaurants")),
+    ("quan an", ("hospitality", "hospitality.restaurants")),
+    ("restaurant", ("hospitality", "hospitality.restaurants")),
     # Government
     ("uy ban nhan dan", ("government", "government.municipal_buildings")),
     ("ubnd", ("government", "government.municipal_buildings")),
     ("cong an", ("government", "government.municipal_buildings")),
     ("thu vien", ("government", "government.libraries")),
-    # Transit
-    ("san bay", ("transit", "transit.airports")),
-    ("ben xe", ("transit", "transit.bus_stations")),
-    ("ga tau", ("transit", "transit.rail")),
-    # Cinema / entertainment
+    # Entertainment / Transit
     ("rap chieu phim", ("entertainment", "entertainment.cinema")),
     ("cgv", ("entertainment", "entertainment.cinema")),
     ("lotte cinema", ("entertainment", "entertainment.cinema")),
-    # Retail brands (shortcut — also handled by BrandDetector → category propagation
-    # would be cleaner, but this lets us tag standalone POIs without a brand match)
+    ("san bay", ("transit", "transit.airports")),
+    ("ben xe", ("transit", "transit.bus_stations")),
+    ("ga tau", ("transit", "transit.rail")),
+    # Convenience-store brand prefixes (BrandDetector handles the canonical
+    # name; this just keeps the category populated when the brand row was
+    # disabled).
     ("circle k", ("retail", "retail.convenience_stores")),
     ("vinmart", ("retail", "retail.convenience_stores")),
     ("winmart", ("retail", "retail.convenience_stores")),
     ("co.opmart", ("retail", "retail.grocery")),
     ("highlands coffee", ("hospitality", "hospitality.cafes")),
+
+    # ---- 2. Education (only fires if no place-type matched) --------------
+    # Composite forms first so they beat the bare ``truong`` / ``dai hoc``.
+    ("truong dai hoc", ("education", "education.colleges_universities")),
+    ("hoc vien", ("education", "education.colleges_universities")),
+    ("university", ("education", "education.colleges_universities")),
+    ("college", ("education", "education.colleges_universities")),
+    ("dai hoc", ("education", "education.colleges_universities")),
+    ("truong mam non", ("education", "education.early_learning")),
+    ("truong mn ", ("education", "education.early_learning")),
+    ("kindergarten", ("education", "education.early_learning")),
+    ("preschool", ("education", "education.early_learning")),
+    ("truong thpt", ("education", "education.schools")),
+    ("truong thcs", ("education", "education.schools")),
+    ("truong tieu hoc", ("education", "education.schools")),
+    ("high school", ("education", "education.schools")),
+    ("primary school", ("education", "education.schools")),
+    ("truong", ("education", "education.schools")),  # generic ``Trường …``
+    ("school", ("education", "education.schools")),
+
+    # ---- 3. Generic / weaker fallbacks -----------------------------------
+    ("quan ca phe", ("hospitality", "hospitality.cafes")),
+    ("ca phe", ("hospitality", "hospitality.cafes")),
+    ("cafe", ("hospitality", "hospitality.cafes")),
+    ("coffee", ("hospitality", "hospitality.cafes")),
 )
 
 

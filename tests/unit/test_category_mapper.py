@@ -130,3 +130,62 @@ def test_map_with_fallback_uses_name_when_raw_empty() -> None:
         "gosom_scraper", None, "Trường Đại học Thương mại"
     )
     assert result == ("education", "education.colleges_universities")
+
+
+# ---- place-type prefix beats institution suffix --------------------------
+
+
+def test_hospital_attached_to_university_is_hospital() -> None:
+    """``Bệnh viện Đại học Y Hà Nội`` is the *teaching hospital* — it's a
+    hospital, not a university, even though "Đại học" appears in the name.
+    The hospital prefix must win.
+    """
+    m = CategoryMapper()
+    assert m.infer_from_name("Bệnh viện Đại học Y Hà Nội") == (
+        "point_of_care", "point_of_care.hospitals"
+    )
+    assert m.infer_from_name("Đại học Y Hà Nội") == (
+        "education", "education.colleges_universities"
+    )
+
+
+def test_clinic_at_a_university_is_clinic() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Phòng khám Đại học Y Dược TP.HCM") == (
+        "point_of_care", "point_of_care.doctor_offices"
+    )
+
+
+def test_pharmacy_inside_a_school_is_pharmacy() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Nhà thuốc Trường Y Hà Nội") == (
+        "retail", "retail.pharmacy"
+    )
+
+
+def test_bank_branch_named_after_school_is_bank() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Ngân hàng Vietcombank chi nhánh Trường Đại học") == (
+        "financial", "financial.banks"
+    )
+
+
+def test_hotel_near_university_is_hotel() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Khách sạn Đại học Quốc gia") == (
+        "travel", "travel.hotels"
+    )
+
+
+def test_pure_university_still_university() -> None:
+    """Make sure we didn't break universities with no place-type prefix."""
+    m = CategoryMapper()
+    assert m.infer_from_name("Trường Đại học Bách khoa Hà Nội") == (
+        "education", "education.colleges_universities"
+    )
+    assert m.infer_from_name("Đại học Kinh tế Quốc dân") == (
+        "education", "education.colleges_universities"
+    )
+    assert m.infer_from_name("Học viện Báo chí và Tuyên truyền") == (
+        "education", "education.colleges_universities"
+    )
