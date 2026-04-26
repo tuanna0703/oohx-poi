@@ -39,11 +39,18 @@ SOURCES: list[dict[str, Any]] = [
         "name": "gosom google-maps-scraper (enrichment sidecar)",
         "adapter_class": "poi_lake.adapters.gosom_scraper:GosomScraperAdapter",
         "config": {
-            "rate_limit_per_minute": 120,
-            "timeout_seconds": 600,
-            "fetch_reviews": True,
-            "fetch_popular_times": True,
-            "fetch_images": False,
+            # Submission rate (jobs/sec). Each gosom job paces its own scrape
+            # internally; this caps how many we kick off per second.
+            "rate_limit_per_second": 0.2,
+            "timeout_seconds": 30,         # HTTP timeout per API call
+            "lang": "vi",
+            "depth": 2,                    # 2 scroll batches ~= 30-40 results
+            "zoom": 15,                    # overridden by adapter from radius
+            "fast_mode": True,             # skip reviews+popular_times for speed
+            "fetch_emails": False,
+            "poll_interval_s": 5,
+            "max_wait_s": 600,             # 10 minutes hard cap per job
+            "cleanup_jobs": True,
         },
         "enabled": False,
         "priority": 30,

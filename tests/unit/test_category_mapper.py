@@ -37,3 +37,24 @@ def test_osm_office_generic_fallback() -> None:
 def test_unknown_source_returns_nones() -> None:
     m = CategoryMapper()
     assert m.map("brand_new_source", "anything") == (None, None)
+
+
+def test_gosom_vietnamese_categories() -> None:
+    m = CategoryMapper()
+    assert m.map("gosom_scraper", "Quán cà phê") == ("hospitality", "hospitality.cafes")
+    assert m.map("gosom_scraper", "Cửa hàng tiện lợi") == ("retail", "retail.convenience_stores")
+    assert m.map("gosom_scraper", "Nhà hàng") == ("hospitality", "hospitality.restaurants")
+    assert m.map("gosom_scraper", "Ngân hàng") == ("financial", "financial.banks")
+    assert m.map("gosom_scraper", "Khách sạn") == ("travel", "travel.hotels")
+
+
+def test_gosom_english_fallback() -> None:
+    m = CategoryMapper()
+    assert m.map("gosom_scraper", "Restaurant") == ("hospitality", "hospitality.restaurants")
+    assert m.map("gosom_scraper", "Pharmacy") == ("retail", "retail.pharmacy")
+
+
+def test_gosom_unknown_category() -> None:
+    m = CategoryMapper()
+    assert m.map("gosom_scraper", "Some random thing") == (None, None)
+    assert m.map("gosom_scraper", None) == (None, None)

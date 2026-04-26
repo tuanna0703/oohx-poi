@@ -6,6 +6,7 @@ canonical fields the rest of the pipeline expects. Resolved by source code.
 
 from poi_lake.pipeline.extractors.base import CanonicalFields, Extractor
 from poi_lake.pipeline.extractors.google_places import GooglePlacesExtractor
+from poi_lake.pipeline.extractors.gosom_scraper import GosomScraperExtractor
 from poi_lake.pipeline.extractors.osm_overpass import OSMOverpassExtractor
 from poi_lake.pipeline.extractors.registry import get_extractor
 
@@ -13,6 +14,7 @@ __all__ = [
     "CanonicalFields",
     "Extractor",
     "GooglePlacesExtractor",
+    "GosomScraperExtractor",
     "OSMOverpassExtractor",
     "get_extractor",
 ]

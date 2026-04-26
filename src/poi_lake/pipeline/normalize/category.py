@@ -165,6 +165,72 @@ _OSM_TAG_MAP: dict[str, CategoryResult] = {
 }
 
 
+# --- gosom ``category`` field → OpenOOH ---
+# gosom emits Google Maps' user-facing category labels in the request lang
+# (we use lang=vi). These are localized strings, not the primaryType used
+# by the Places API. We match by accent-folded substring against this list.
+# Order matters: longer / more specific keys first.
+_GOSOM_CATEGORY_MAP: tuple[tuple[str, tuple[str, str | None]], ...] = (
+    ("trung tam thuong mai", ("retail", "retail.shopping_malls")),
+    ("cua hang tien loi", ("retail", "retail.convenience_stores")),
+    ("cua hang dien may", ("retail", "retail.electronics")),
+    ("cua hang dien thoai", ("retail", "retail.electronics")),
+    ("cua hang quan ao", ("retail", "retail.apparel")),
+    ("nha thuoc", ("retail", "retail.pharmacy")),
+    ("hieu thuoc", ("retail", "retail.pharmacy")),
+    ("tram xang", ("retail", "retail.gas_stations")),
+    ("sieu thi", ("retail", "retail.grocery")),
+    ("cua hang", ("retail", None)),
+    ("benh vien", ("point_of_care", "point_of_care.hospitals")),
+    ("phong kham", ("point_of_care", "point_of_care.doctor_offices")),
+    ("nha thuoc", ("retail", "retail.pharmacy")),
+    ("nha hang", ("hospitality", "hospitality.restaurants")),
+    ("quan an", ("hospitality", "hospitality.restaurants")),
+    ("quan ca phe", ("hospitality", "hospitality.cafes")),
+    ("ca phe", ("hospitality", "hospitality.cafes")),
+    ("cafe", ("hospitality", "hospitality.cafes")),
+    ("coffee", ("hospitality", "hospitality.cafes")),
+    ("quan bar", ("hospitality", "hospitality.bars")),
+    ("quan an nhanh", ("hospitality", "hospitality.fast_food")),
+    ("thuc an nhanh", ("hospitality", "hospitality.fast_food")),
+    ("ngan hang", ("financial", "financial.banks")),
+    ("may rut tien", ("financial", "financial.atms")),
+    ("atm", ("financial", "financial.atms")),
+    ("khach san", ("travel", "travel.hotels")),
+    ("nha nghi", ("travel", "travel.hotels")),
+    ("hostel", ("travel", "travel.hostels")),
+    ("rap chieu phim", ("entertainment", "entertainment.cinema")),
+    ("phong gym", ("sports_and_fitness", "sports_and_fitness.gyms")),
+    ("trung tam the duc", ("sports_and_fitness", "sports_and_fitness.gyms")),
+    ("san van dong", ("sports_and_fitness", "sports_and_fitness.stadiums")),
+    ("truong dai hoc", ("education", "education.colleges_universities")),
+    ("dai hoc", ("education", "education.colleges_universities")),
+    ("truong hoc", ("education", "education.schools")),
+    ("mau giao", ("education", "education.early_learning")),
+    ("bao tang", ("leisure", "leisure.museums_galleries")),
+    ("phong tranh", ("leisure", "leisure.museums_galleries")),
+    ("cong vien", ("outdoor", "outdoor.parks")),
+    ("salon toc", ("health_and_beauty", "health_and_beauty.salons")),
+    ("salon lam dep", ("health_and_beauty", "health_and_beauty.salons")),
+    ("spa", ("health_and_beauty", "health_and_beauty.spas")),
+    ("tho cat toc", ("health_and_beauty", "health_and_beauty.barbers")),
+    ("san bay", ("transit", "transit.airports")),
+    ("ben xe", ("transit", "transit.bus_stations")),
+    ("ga tau", ("transit", "transit.rail")),
+    # Fallback English aliases that often appear in mixed-language gosom output:
+    ("restaurant", ("hospitality", "hospitality.restaurants")),
+    ("convenience store", ("retail", "retail.convenience_stores")),
+    ("supermarket", ("retail", "retail.grocery")),
+    ("shopping mall", ("retail", "retail.shopping_malls")),
+    ("pharmacy", ("retail", "retail.pharmacy")),
+    ("bank", ("financial", "financial.banks")),
+    ("hotel", ("travel", "travel.hotels")),
+    ("cinema", ("entertainment", "entertainment.cinema")),
+    ("hospital", ("point_of_care", "point_of_care.hospitals")),
+    ("school", ("education", "education.schools")),
+)
+
+
 class CategoryMapper:
     """Resolve a source-native category string into an OpenOOH (top, sub)."""
 
@@ -184,10 +250,25 @@ class CategoryMapper:
             return _OSM_TAG_MAP["office=*"]
         return (None, None)
 
+    def map_gosom(self, category_text: str | None) -> CategoryResult:
+        if not category_text:
+            return (None, None)
+        from poi_lake.pipeline.normalize.text import normalize_text
+
+        folded = normalize_text(category_text)
+        if not folded:
+            return (None, None)
+        for needle, result in _GOSOM_CATEGORY_MAP:
+            if needle in folded:
+                return result
+        return (None, None)
+
     def map(self, source_code: str, raw_category: str | None) -> CategoryResult:
         if source_code == "google_places":
             return self.map_google(raw_category)
         if source_code == "osm_overpass":
             return self.map_osm(raw_category)
-        # Phase 2b sources will register their own mappers.
+        if source_code == "gosom_scraper":
+            return self.map_gosom(raw_category)
+        # Phase 2b will additionally register: vietmap, foody.
         return (None, None)

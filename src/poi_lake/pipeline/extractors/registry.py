@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from poi_lake.pipeline.extractors.base import Extractor
 from poi_lake.pipeline.extractors.google_places import GooglePlacesExtractor
+from poi_lake.pipeline.extractors.gosom_scraper import GosomScraperExtractor
 from poi_lake.pipeline.extractors.osm_overpass import OSMOverpassExtractor
 
 _EXTRACTORS: dict[str, type[Extractor]] = {
     "google_places": GooglePlacesExtractor,
     "osm_overpass": OSMOverpassExtractor,
-    # Phase 2b will register: gosom_scraper, vietmap, foody
+    "gosom_scraper": GosomScraperExtractor,
+    # Phase 2b will additionally register: vietmap, foody
 }
 
 
