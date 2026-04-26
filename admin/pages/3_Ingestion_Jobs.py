@@ -25,7 +25,11 @@ from sqlalchemy import text
 
 from admin.lib.api import post_json
 from admin.lib.db import session as db_session
-from admin.lib.queries import per_source_stats, recent_jobs
+from admin.lib.queries import (
+    all_brands_for_picker,
+    per_source_stats,
+    recent_jobs,
+)
 from poi_lake.pipeline.normalize.openooh_keywords import (
     is_openooh_code,
     keywords_for_openooh,
@@ -151,12 +155,19 @@ with st.expander("Trigger a new job", expanded=True):
             else dist_label.split(" — ", 1)[0]
         )
 
-    # ---- Category multiselect -------------------------------------------
+    # ---- Category / brand multiselect -----------------------------------
     st.markdown("---")
     cat_mode = st.radio(
-        "Category input",
-        ["OpenOOH codes (multiple)", "Free text (single)", "(none)"],
+        "What to search for",
+        [
+            "OpenOOH codes (multiple)",
+            "Brands (multiple)",
+            "Free text (single)",
+            "(none)",
+        ],
         horizontal=True,
+        help="Brands run a gosom keyword for each picked brand — useful "
+             "for chain coverage like 'every Starbucks in Hà Nội'.",
     )
     chosen_categories: list[str] = []
     if cat_mode == "OpenOOH codes (multiple)":
@@ -171,6 +182,46 @@ with st.expander("Trigger a new job", expanded=True):
             help="Each picked category becomes its own set of jobs.",
         )
         chosen_categories = [p.split(" — ", 1)[0] for p in picked]
+
+    elif cat_mode == "Brands (multiple)":
+        brands_df = all_brands_for_picker()
+        # Label format: "Starbucks (hospitality)" so the user sees the
+        # rough category alongside the brand name.
+        labels = [
+            f"{r['name']}  ·  {r.category or '-'}"
+            for _, r in brands_df.iterrows()
+        ]
+        picked = st.multiselect(
+            "Brands",
+            options=labels,
+            help="Each brand becomes a gosom keyword. Add the brand's "
+                 "first alias too for wider coverage (toggle below).",
+        )
+        chosen_brands = [p.split("  ·  ", 1)[0] for p in picked]
+        with_aliases = st.checkbox(
+            "Also search alias names (richer coverage, more queries)",
+            value=False,
+        )
+        for brand_name in chosen_brands:
+            chosen_categories.append(brand_name)
+            if with_aliases:
+                row = brands_df[brands_df["name"] == brand_name].iloc[0]
+                aliases = list(row.aliases) if hasattr(row.aliases, "__iter__") else []
+                # Take the first non-trivial alias to avoid doubling cost.
+                for alias in aliases[:1]:
+                    if alias and alias != brand_name:
+                        chosen_categories.append(alias)
+        # Manual extra terms for brands not in the seeded table.
+        extra = st.text_input(
+            "Extra brand keywords (comma-separated)",
+            value="",
+            help="Add brands missing from the seeded list, e.g. 'Medlatec, Pacific Cross'.",
+        )
+        if extra.strip():
+            chosen_categories.extend(
+                [t.strip() for t in extra.split(",") if t.strip()]
+            )
+
     elif cat_mode == "Free text (single)":
         txt = st.text_input("category", value="cafe").strip()
         if txt:

@@ -230,6 +230,20 @@ def brands_with_counts() -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=120)
+def all_brands_for_picker() -> pd.DataFrame:
+    """Every enabled brand in the ``brands`` reference table — used to
+    populate the Ingestion Jobs brand-picker. Includes ``aliases`` so the
+    UI can offer "name + first alias" as richer keyword fan-out."""
+    return _df(
+        """
+        SELECT name, category, parent_company, aliases
+        FROM brands WHERE enabled = TRUE
+        ORDER BY name
+        """
+    )
+
+
 # --------------------------------------------------------------- dedupe queue
 
 
