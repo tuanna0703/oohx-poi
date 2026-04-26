@@ -1,0 +1,112 @@
+{
+  "title": "POI Lake — Pipeline",
+  "uid": "poi-lake",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": ["poi-lake"],
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Raw POIs ingested (rate / 5m, by source)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [{
+        "expr": "sum by (source) (rate(poi_lake_ingest_raw_inserted_total[5m]))",
+        "legendFormat": "{{source}}"
+      }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Processed POIs / 5m",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "targets": [{
+        "expr": "sum(rate(poi_lake_normalize_processed_inserted_total[5m]))",
+        "legendFormat": "processed"
+      }]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Masters created / 1h",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "targets": [{
+        "expr": "sum(increase(poi_lake_merge_masters_created_total[1h]))",
+        "legendFormat": "masters"
+      }]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "HTTP request rate by status class",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [{
+        "expr": "sum by (status) (rate(poi_lake_http_requests_total[5m]))",
+        "legendFormat": "{{status}}"
+      }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP latency p50/p95/p99",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(poi_lake_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(poi_lake_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(poi_lake_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Dedupe decisions (cumulative)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [{
+        "expr": "sum by (decision) (poi_lake_dedupe_decisions_total)",
+        "legendFormat": "{{decision}}"
+      }]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "LLM calls / 5m by outcome",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [{
+        "expr": "sum by (outcome) (rate(poi_lake_llm_calls_total[5m]))",
+        "legendFormat": "{{outcome}}"
+      }]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "LLM tokens (24h)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 22 },
+      "targets": [{
+        "expr": "sum by (model, direction) (increase(poi_lake_llm_tokens_total[24h]))",
+        "legendFormat": "{{model}} / {{direction}}"
+      }]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Queue depth",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 22 },
+      "targets": [{
+        "expr": "poi_lake_queue_depth",
+        "legendFormat": "{{queue}}"
+      }]
+    }
+  ]
+}

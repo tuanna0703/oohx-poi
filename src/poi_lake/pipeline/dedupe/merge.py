@@ -34,6 +34,8 @@ from poi_lake.db.models import (
     RawPOI,
     Source,
 )
+from poi_lake.observability import DEDUPE_DECISIONS, MERGE_MASTERS_CREATED
+from poi_lake.observability.metrics import MERGE_MEMBERS
 from poi_lake.pipeline.dedupe.clusterer import SpatialClusterer
 from poi_lake.pipeline.dedupe.decision import DedupeDecision, decide
 from poi_lake.pipeline.dedupe.resolver import LLMResolver, LLMResolution
@@ -284,6 +286,7 @@ class MergeService:
                 a, b = rows[i], rows[j]
                 score = self.scorer.score(a, b)
                 d = decide(score.composite)
+                DEDUPE_DECISIONS.labels(d.value).inc()
                 if d is DedupeDecision.AUTO_MERGE:
                     union(a.id, b.id)
                 elif d is DedupeDecision.NEEDS_LLM and self.resolver is not None:
@@ -462,6 +465,8 @@ class MergeService:
             },
         )
 
+        MERGE_MASTERS_CREATED.inc()
+        MERGE_MEMBERS.inc(len(members))
         logger.info(
             "merge: master=%s members=%d sources=%s name=%r",
             master_id, len(members), {r["source"] for r in source_refs}, canonical["canonical_name"],

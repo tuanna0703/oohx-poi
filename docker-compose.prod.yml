@@ -1,0 +1,130 @@
+# Production overrides — apply with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences from the dev compose:
+#   * No source-mount volumes (immutable images).
+#   * Named external volumes for persistent data.
+#   * APP_ENV=production → JSON logs.
+#   * Resource limits per service.
+#   * Restart policy = always (was unless-stopped).
+#   * Prometheus + Grafana under the ``monitoring`` profile.
+#   * dramatiq Prometheus exposition port 9191 published on the worker.
+
+name: poi-lake
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_PASSWORD:               # fallback to env from .env if no secret
+    volumes:
+      - poi_postgres_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 4G }
+        reservations: { cpus: "0.5", memory: 1G }
+    restart: always
+
+  redis:
+    volumes:
+      - poi_redis_data:/data
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512M }
+    restart: always
+
+  api:
+    environment:
+      APP_ENV: production
+      APP_LOG_LEVEL: INFO
+      DATABASE_POOL_SIZE: "30"
+    volumes: !reset []                  # drop the dev source mounts
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 2G }
+        reservations: { cpus: "0.25", memory: 256M }
+    restart: always
+
+  worker:
+    environment:
+      APP_ENV: production
+      APP_LOG_LEVEL: INFO
+      # dramatiq.middleware.prometheus exposes its own /metrics on this port
+      # inside the container — published to the host so Prometheus can scrape.
+      dramatiq_prom_host: 0.0.0.0
+      dramatiq_prom_port: "9191"
+    volumes: !reset
+      - poi_model_cache:/app/models
+    ports:
+      - "9191:9191"
+    # ``deploy.replicas`` doesn't co-exist with ``container_name``; for real
+    # horizontal scaling use Swarm/Kubernetes. Within docker-compose, raise
+    # the dramatiq ``--processes`` flag in the worker command instead.
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 3G }
+        reservations: { cpus: "0.5", memory: 1G }
+    restart: always
+
+  admin:
+    environment:
+      APP_ENV: production
+    volumes: !reset []
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 1G }
+    restart: always
+
+  gosom-scraper:
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+    restart: always
+
+  # ---- monitoring stack (opt-in: ``--profile monitoring``) ----
+
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:v2.55.1
+    container_name: poi-lake-prometheus
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - poi_prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    ports:
+      - "9090:9090"
+    restart: always
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:11.3.0
+    container_name: poi-lake-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - poi_grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: always
+
+volumes:
+  poi_postgres_data:
+    name: poi_postgres_data
+  poi_redis_data:
+    name: poi_redis_data
+  poi_model_cache:
+    name: poi_model_cache
+  poi_prometheus_data:
+    name: poi_prometheus_data
+  poi_grafana_data:
+    name: poi_grafana_data

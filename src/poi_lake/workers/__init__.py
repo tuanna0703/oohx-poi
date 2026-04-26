@@ -18,12 +18,16 @@ from dramatiq.brokers.redis import RedisBroker
 from dramatiq.middleware import AgeLimit, Callbacks, Pipelines, Retries, ShutdownNotifications, TimeLimit
 
 from poi_lake.config import get_settings
+from poi_lake.observability import configure_logging
 
 logger = logging.getLogger(__name__)
 
 
 def _configure_broker() -> RedisBroker:
     settings = get_settings()
+    # Configure structlog at worker start so dramatiq's own log lines are
+    # JSON-formatted in production.
+    configure_logging(env=settings.app_env, level=settings.app_log_level)
     broker = RedisBroker(url=settings.redis_url)
     # Default middlewares minus Prometheus (will be added in Phase 7).
     broker.add_middleware(AgeLimit())

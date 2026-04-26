@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'oohx-poi/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'oohx-poi/**'
+
+defaults:
+  run:
+    working-directory: oohx-poi
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: oohx-poi/pyproject.toml
+
+      - name: install dev deps
+        run: |
+          pip install --upgrade pip
+          # CPU-only torch keeps the install small and fast in CI.
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.5.1"
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check src tests
+
+      - name: mypy
+        run: mypy --no-incremental src
+        continue-on-error: true   # mypy is informational until the codebase is fully typed
+
+  tests:
+    name: pytest (postgres + redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # PostGIS + pgvector preinstalled — same image we use in dev/prod.
+        image: imresamu/postgis-pgvector:16-3.4-0.7
+        env:
+          POSTGRES_DB: poi_lake
+          POSTGRES_USER: poi
+          POSTGRES_PASSWORD: poi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U poi -d poi_lake"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    env:
+      APP_SECRET_KEY: "test-secret-test-secret-test-secret-test-xxxxxxxxx"
+      DATABASE_URL: "postgresql+asyncpg://poi:poi@localhost:5432/poi_lake"
+      REDIS_URL: "redis://localhost:6379/0"
+      ANTHROPIC_API_KEY: ""
+      EMBEDDING_CACHE_DIR: "/tmp/poi-models"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: oohx-poi/pyproject.toml
+
+      - name: install deps
+        run: |
+          pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.5.1"
+          pip install -e ".[dev]"
+
+      - name: alembic upgrade
+        run: alembic upgrade head
+
+      - name: seed reference tables
+        run: python scripts/seed_all.py
+
+      - name: pytest
+        run: python -m pytest tests -q
+
+  docker-build:
+    name: docker build (api + admin + postgres)
+    runs-on: ubuntu-latest
+    needs: [lint, tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: build api image
+        uses: docker/build-push-action@v6
+        with:
+          context: oohx-poi
+          file: oohx-poi/docker/api/Dockerfile
+          push: false
+          load: true
+          tags: poi-lake/api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: build admin image
+        uses: docker/build-push-action@v6
+        with:
+          context: oohx-poi
+          file: oohx-poi/docker/admin/Dockerfile
+          push: false
+          load: true
+          tags: poi-lake/admin:ci
+          cache-from: type=gha,scope=admin
+          cache-to: type=gha,scope=admin,mode=max
+
+      - name: build postgres image
+        uses: docker/build-push-action@v6
+        with:
+          context: oohx-poi/docker/postgres
+          push: false
+          load: true
+          tags: poi-lake/postgres:ci
+          cache-from: type=gha,scope=postgres
+          cache-to: type=gha,scope=postgres,mode=max

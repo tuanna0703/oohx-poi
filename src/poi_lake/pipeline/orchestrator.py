@@ -21,6 +21,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.db.models import ProcessedPOI, RawPOI, Source
+from poi_lake.observability import NORMALIZE_PROCESSED_INSERTED
+from poi_lake.observability.metrics import NORMALIZE_SKIPPED
 from poi_lake.pipeline.embed import EmbeddingService, get_embedding_service
 from poi_lake.pipeline.extractors import get_extractor
 from poi_lake.pipeline.normalize import (
@@ -93,6 +95,7 @@ class NormalizePipeline:
         canonical = extractor.extract(raw.raw_payload or {})
         if canonical is None or not canonical.name:
             logger.info("normalize: raw_poi %d has no usable name; skipping", raw_poi_id)
+            NORMALIZE_SKIPPED.labels(source.code, "no_name").inc()
             await self._mark_processed(session, raw)
             await session.commit()
             return None
@@ -133,6 +136,7 @@ class NormalizePipeline:
         else:
             # processed_pois.location is NOT NULL — without coords we can't process.
             logger.info("normalize: raw_poi %d has no coordinates; skipping", raw_poi_id)
+            NORMALIZE_SKIPPED.labels(source.code, "no_coords").inc()
             await self._mark_processed(session, raw)
             await session.commit()
             return None
@@ -179,6 +183,7 @@ class NormalizePipeline:
         new_id = result.scalar_one()
         await self._mark_processed(session, raw)
         await session.commit()
+        NORMALIZE_PROCESSED_INSERTED.labels(source.code).inc()
         logger.info(
             "normalize: raw_poi %d → processed_poi %d (q=%.2f, brand=%s, cat=%s)",
             raw.id, new_id, composite, brand_match.name if brand_match else "-", top_cat,

@@ -20,6 +20,7 @@ from typing import Any
 import redis.asyncio as redis_asyncio
 
 from poi_lake.config import get_settings
+from poi_lake.observability.metrics import LLM_CALLS, LLM_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ class LLMResolver:
         if cached:
             try:
                 data = json.loads(cached)
+                LLM_CALLS.labels(self._model, "cached").inc()
                 return LLMResolution(
                     same=bool(data["same"]),
                     confidence=float(data.get("confidence", 0.0)),
@@ -121,7 +123,12 @@ class LLMResolver:
             except (ValueError, KeyError):
                 logger.warning("invalid cache value for %s — re-querying", key)
 
-        result = await self._call_llm(record_a, record_b)
+        try:
+            result = await self._call_llm(record_a, record_b)
+            LLM_CALLS.labels(self._model, "hit").inc()
+        except Exception:
+            LLM_CALLS.labels(self._model, "error").inc()
+            raise
         await rc.set(
             key,
             json.dumps({"same": result.same, "confidence": result.confidence, "reason": result.reason}),
@@ -149,6 +156,11 @@ class LLMResolver:
             )
 
         msg = await asyncio.to_thread(_do_call)
+        # Track token usage for cost dashboards.
+        usage = getattr(msg, "usage", None)
+        if usage is not None:
+            LLM_TOKENS.labels(self._model, "input").inc(getattr(usage, "input_tokens", 0))
+            LLM_TOKENS.labels(self._model, "output").inc(getattr(usage, "output_tokens", 0))
         text_blocks = [b.text for b in msg.content if getattr(b, "type", "") == "text"]
         raw = "".join(text_blocks).strip()
         return _parse_llm_reply(raw)

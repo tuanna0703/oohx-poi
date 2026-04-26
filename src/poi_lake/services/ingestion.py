@@ -28,6 +28,10 @@ from poi_lake.adapters import (
     build_adapter_for_source,
 )
 from poi_lake.db.models import IngestionJob, IngestionJobStatus, RawPOI, Source
+from poi_lake.observability import (
+    INGEST_RAW_INSERTED,
+)
+from poi_lake.observability.metrics import INGEST_ERRORS, INGEST_RAW_DUPLICATES
 from poi_lake.services.hashing import content_hash
 
 logger = logging.getLogger(__name__)
@@ -66,12 +70,15 @@ class IngestionService:
                     except SQLAlchemyError as exc:
                         logger.exception("raw_pois insert failed: %s", exc)
                         stats["errors"] += 1
+                        INGEST_ERRORS.labels(source.code).inc()
                         continue
                     if new_id is not None:
                         stats["new"] += 1
+                        INGEST_RAW_INSERTED.labels(source.code).inc()
                         self._enqueue_normalize(new_id)
                     else:
                         stats["duplicate"] += 1
+                        INGEST_RAW_DUPLICATES.labels(source.code).inc()
         except AdapterTransientError as exc:
             await self._fail(job, f"transient: {exc}", stats)
             raise
