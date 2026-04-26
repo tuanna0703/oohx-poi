@@ -48,6 +48,9 @@ admin = [
     "streamlit-folium>=0.23,<1",
     "folium>=0.18,<1",
     "pandas>=2.2,<3",
+    # Sync DB driver — Streamlit reruns the script on each interaction, so
+    # the async engine is the wrong fit. psycopg3 binary wheel is enough.
+    "psycopg[binary]>=3.2,<4",
 ]
 scraping = [
     "playwright>=1.48,<2",

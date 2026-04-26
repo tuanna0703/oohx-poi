@@ -145,6 +145,55 @@ class MergeService:
         self.resolver = resolver  # may be None (skips NEEDS_LLM pairs)
         self.builder = MasterRecordBuilder()
 
+    async def merge_records(
+        self,
+        session: AsyncSession,
+        processed_poi_ids: list[int],
+    ) -> int | None:
+        """Force-merge the given pending records into one master_pois row.
+
+        Used by the admin UI's manual-override path. Skips any rows that are
+        already merged or rejected. Returns the new master_poi.id, or None
+        if nothing to merge.
+        """
+        if not processed_poi_ids:
+            return None
+
+        rows = (
+            await session.execute(
+                select(ProcessedPOI).where(
+                    ProcessedPOI.id.in_(processed_poi_ids),
+                    ProcessedPOI.merge_status == MergeStatus.PENDING.value,
+                )
+            )
+        ).scalars().all()
+        if not rows:
+            return None
+
+        # Attach source_id for the priority tie-breaker.
+        raw_to_source = {
+            rid: sid
+            for rid, sid in (
+                await session.execute(
+                    select(RawPOI.id, RawPOI.source_id).where(
+                        RawPOI.id.in_({r.raw_poi_id for r in rows})
+                    )
+                )
+            ).all()
+        }
+        for r in rows:
+            r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
+
+        src_rows = (await session.execute(select(Source.id, Source.priority))).all()
+        priority_by_source = {sid: pri for sid, pri in src_rows}
+
+        await self._make_master(session, rows, priority_by_source)
+        await session.commit()
+
+        # Read back the master_poi.id from the first row.
+        await session.refresh(rows[0])
+        return rows[0].merged_into
+
     async def dedupe_pending(
         self,
         session: AsyncSession,

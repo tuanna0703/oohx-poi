@@ -113,8 +113,13 @@ services:
     env_file:
       - .env
     environment:
+      # Async URL (for symmetry with api) — admin/lib/db.py strips +asyncpg
       DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
       POI_LAKE_API_URL: http://api:8000
+    volumes:
+      # Mount source so editing admin/* doesn't require a rebuild.
+      - ./admin:/app/admin:ro
+      - ./src:/app/src:ro
     ports:
       - "8501:8501"
     depends_on:

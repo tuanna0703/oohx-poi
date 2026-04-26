@@ -122,6 +122,50 @@ async def trigger_dedupe() -> dict[str, str]:
     return {"status": "enqueued", "message_id": msg.message_id}
 
 
+class ManualMergeRequest(BaseModel):
+    processed_poi_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+@router.post("/dedupe/manual-merge", status_code=status.HTTP_200_OK)
+async def manual_merge(
+    payload: ManualMergeRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Force-merge the given pending processed_pois into one master."""
+    from poi_lake.pipeline.dedupe import MergeService
+
+    master_id = await MergeService().merge_records(session, payload.processed_poi_ids)
+    if master_id is None:
+        return {"status": "skipped", "reason": "no eligible pending rows"}
+    return {"status": "merged", "master_poi_id": str(master_id)}
+
+
+class ManualRejectRequest(BaseModel):
+    processed_poi_ids: list[int] = Field(min_length=1, max_length=100)
+    reason: str = Field(default="manual override", max_length=200)
+
+
+@router.post("/dedupe/manual-reject", status_code=status.HTTP_200_OK)
+async def manual_reject(
+    payload: ManualRejectRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Mark the given processed_pois as ``rejected`` so they are excluded
+    from future dedupe passes."""
+    from sqlalchemy import text as _text
+
+    result = await session.execute(
+        _text(
+            "UPDATE processed_pois SET merge_status = 'rejected', "
+            "merge_reason = :reason WHERE id = ANY(:ids) "
+            "AND merge_status = 'pending'"
+        ),
+        {"reason": payload.reason, "ids": payload.processed_poi_ids},
+    )
+    await session.commit()
+    return {"status": "rejected", "rows_updated": result.rowcount}
+
+
 @router.get("/ingestion-jobs/{job_id}", response_model=IngestionJobOut)
 async def get_ingestion_job(
     job_id: int, session: AsyncSession = Depends(get_session)
