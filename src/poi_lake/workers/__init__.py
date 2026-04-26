@@ -40,5 +40,6 @@ def _configure_broker() -> RedisBroker:
 broker = _configure_broker()
 
 # Importing the actor modules registers actors against the broker.
+from poi_lake.workers import dedupe  # noqa: E402, F401
 from poi_lake.workers import ingest  # noqa: E402, F401  (side-effect import)
 from poi_lake.workers import normalize  # noqa: E402, F401

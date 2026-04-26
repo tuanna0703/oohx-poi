@@ -107,6 +107,16 @@ async def list_ingestion_jobs(
     return IngestionJobsList(items=items, total=total)
 
 
+@router.post("/dedupe/run", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_dedupe() -> dict[str, str]:
+    """Enqueue a dedupe pass. The worker handles all currently-pending rows."""
+    from poi_lake.workers.dedupe import run_dedupe
+
+    msg = run_dedupe.send()
+    logger.info("enqueued dedupe pass: message_id=%s", msg.message_id)
+    return {"status": "enqueued", "message_id": msg.message_id}
+
+
 @router.get("/ingestion-jobs/{job_id}", response_model=IngestionJobOut)
 async def get_ingestion_job(
     job_id: int, session: AsyncSession = Depends(get_session)

@@ -93,7 +93,7 @@ services:
     # Threads share the cached async engine, but asyncpg connections aren't
     # safe to use from multiple event loops. Run 1 thread/process and scale
     # with --processes when throughput matters.
-    command: ["dramatiq", "poi_lake.workers", "--processes", "2", "--threads", "1", "--queues", "ingest", "normalize"]
+    command: ["dramatiq", "poi_lake.workers", "--processes", "2", "--threads", "1", "--queues", "ingest", "normalize", "dedupe"]
     volumes:
       - ./src:/app/src:ro
       - model_cache:/app/models
