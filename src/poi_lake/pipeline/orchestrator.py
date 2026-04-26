@@ -103,7 +103,9 @@ class NormalizePipeline:
         # 2. Normalize each field.
         addr_norm_str, addr_components = self.address_norm.normalize(canonical.address or "")
         phone_e164 = self.phone_norm.normalize(canonical.phone)
-        top_cat, sub_cat = self.category_map.map(source.code, canonical.raw_category)
+        top_cat, sub_cat = self.category_map.map_with_fallback(
+            source.code, canonical.raw_category, canonical.name
+        )
 
         if not self.brand_detector._brands:  # type: ignore[attr-defined]
             await self.brand_detector.refresh(session)

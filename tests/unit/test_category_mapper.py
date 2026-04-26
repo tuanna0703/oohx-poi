@@ -58,3 +58,75 @@ def test_gosom_unknown_category() -> None:
     m = CategoryMapper()
     assert m.map("gosom_scraper", "Some random thing") == (None, None)
     assert m.map("gosom_scraper", None) == (None, None)
+
+
+# ---- name-inference fallback (gosom often returns empty raw_category) ----
+
+
+def test_infer_education_from_vn_name() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Trường Đại học Kinh tế Quốc dân") == (
+        "education", "education.colleges_universities"
+    )
+    assert m.infer_from_name("Học viện Báo chí và Tuyên truyền") == (
+        "education", "education.colleges_universities"
+    )
+    assert m.infer_from_name("Trường THCS Láng Thượng") == (
+        "education", "education.schools"
+    )
+    assert m.infer_from_name("Trường Mầm Non Hoa Linh") == (
+        "education", "education.early_learning"
+    )
+
+
+def test_infer_education_from_english_name() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Hanoi International School") == (
+        "education", "education.schools"
+    )
+    assert m.infer_from_name("Columbia Southern University Hà Nội") == (
+        "education", "education.colleges_universities"
+    )
+    assert m.infer_from_name("Aqua-Tots Swim School") == (
+        "education", "education.schools"
+    )
+
+
+def test_infer_other_categories() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Bệnh viện Bạch Mai") == (
+        "point_of_care", "point_of_care.hospitals"
+    )
+    assert m.infer_from_name("Ngân hàng Vietcombank chi nhánh Cầu Giấy") == (
+        "financial", "financial.banks"
+    )
+    assert m.infer_from_name("Cộng Cà Phê Phan Đình Phùng") == (
+        "hospitality", "hospitality.cafes"
+    )
+    assert m.infer_from_name("Khách sạn Sofitel") == ("travel", "travel.hotels")
+
+
+def test_infer_returns_none_for_generic() -> None:
+    m = CategoryMapper()
+    assert m.infer_from_name("Foo Bar") == (None, None)
+    assert m.infer_from_name("") == (None, None)
+    assert m.infer_from_name(None) == (None, None)
+
+
+def test_map_with_fallback_uses_raw_first() -> None:
+    """When raw_category resolves cleanly, the name-fallback isn't consulted."""
+    m = CategoryMapper()
+    # raw=cafe wins even though the name has "Trường"
+    result = m.map_with_fallback(
+        "gosom_scraper", "Quán cà phê", "Trường ABC"
+    )
+    assert result == ("hospitality", "hospitality.cafes")
+
+
+def test_map_with_fallback_uses_name_when_raw_empty() -> None:
+    """gosom returning an empty category falls back to the name heuristic."""
+    m = CategoryMapper()
+    result = m.map_with_fallback(
+        "gosom_scraper", None, "Trường Đại học Thương mại"
+    )
+    assert result == ("education", "education.colleges_universities")

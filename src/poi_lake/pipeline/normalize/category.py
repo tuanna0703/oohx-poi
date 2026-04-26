@@ -231,6 +231,71 @@ _GOSOM_CATEGORY_MAP: tuple[tuple[str, tuple[str, str | None]], ...] = (
 )
 
 
+# --- name-based fallback ---------------------------------------------------
+# When a source returns an empty / unknown ``raw_category`` (gosom CSV often
+# does this for non-business places like schools and government offices), we
+# can still infer the category from the canonical name. The keys are accent-
+# folded substrings so we can match either Vietnamese-with-diacritics or
+# romanized inputs.
+_NAME_INFERENCE_RULES: tuple[tuple[str, CategoryResult], ...] = (
+    # Education (must come before generic fallback patterns)
+    ("truong dai hoc", ("education", "education.colleges_universities")),
+    ("dai hoc", ("education", "education.colleges_universities")),
+    ("hoc vien", ("education", "education.colleges_universities")),
+    ("university", ("education", "education.colleges_universities")),
+    ("college", ("education", "education.colleges_universities")),
+    ("truong thpt", ("education", "education.schools")),
+    ("truong thcs", ("education", "education.schools")),
+    ("truong tieu hoc", ("education", "education.schools")),
+    ("high school", ("education", "education.schools")),
+    ("primary school", ("education", "education.schools")),
+    ("truong mam non", ("education", "education.early_learning")),
+    ("truong mn", ("education", "education.early_learning")),
+    ("kindergarten", ("education", "education.early_learning")),
+    ("preschool", ("education", "education.early_learning")),
+    ("truong", ("education", "education.schools")),  # generic ``Trường …``
+    ("school", ("education", "education.schools")),
+    # Point of care
+    ("benh vien", ("point_of_care", "point_of_care.hospitals")),
+    ("hospital", ("point_of_care", "point_of_care.hospitals")),
+    ("phong kham", ("point_of_care", "point_of_care.doctor_offices")),
+    ("clinic", ("point_of_care", "point_of_care.doctor_offices")),
+    ("nha thuoc", ("retail", "retail.pharmacy")),
+    ("nha si", ("point_of_care", "point_of_care.dentist_offices")),
+    # Financial
+    ("ngan hang", ("financial", "financial.banks")),
+    # Hospitality / coffee
+    ("ca phe", ("hospitality", "hospitality.cafes")),
+    ("cafe", ("hospitality", "hospitality.cafes")),
+    ("nha hang", ("hospitality", "hospitality.restaurants")),
+    ("restaurant", ("hospitality", "hospitality.restaurants")),
+    ("quan an", ("hospitality", "hospitality.restaurants")),
+    # Travel
+    ("khach san", ("travel", "travel.hotels")),
+    ("hotel", ("travel", "travel.hotels")),
+    # Government
+    ("uy ban nhan dan", ("government", "government.municipal_buildings")),
+    ("ubnd", ("government", "government.municipal_buildings")),
+    ("cong an", ("government", "government.municipal_buildings")),
+    ("thu vien", ("government", "government.libraries")),
+    # Transit
+    ("san bay", ("transit", "transit.airports")),
+    ("ben xe", ("transit", "transit.bus_stations")),
+    ("ga tau", ("transit", "transit.rail")),
+    # Cinema / entertainment
+    ("rap chieu phim", ("entertainment", "entertainment.cinema")),
+    ("cgv", ("entertainment", "entertainment.cinema")),
+    ("lotte cinema", ("entertainment", "entertainment.cinema")),
+    # Retail brands (shortcut — also handled by BrandDetector → category propagation
+    # would be cleaner, but this lets us tag standalone POIs without a brand match)
+    ("circle k", ("retail", "retail.convenience_stores")),
+    ("vinmart", ("retail", "retail.convenience_stores")),
+    ("winmart", ("retail", "retail.convenience_stores")),
+    ("co.opmart", ("retail", "retail.grocery")),
+    ("highlands coffee", ("hospitality", "hospitality.cafes")),
+)
+
+
 class CategoryMapper:
     """Resolve a source-native category string into an OpenOOH (top, sub)."""
 
@@ -272,3 +337,32 @@ class CategoryMapper:
             return self.map_gosom(raw_category)
         # Phase 2b will additionally register: vietmap, foody.
         return (None, None)
+
+    def infer_from_name(self, name: str | None) -> CategoryResult:
+        """Last-resort fallback when ``map(...)`` returned ``(None, None)``.
+
+        Scans the accent-folded name for VN-specific keywords (``Trường``,
+        ``Bệnh viện``, ``Ngân hàng`` …) plus a few English common ones.
+        Returns the first rule that matches — order in ``_NAME_INFERENCE_RULES``
+        encodes priority (longer / more specific patterns first).
+        """
+        if not name:
+            return (None, None)
+        from poi_lake.pipeline.normalize.text import normalize_text
+
+        folded = normalize_text(name)
+        if not folded:
+            return (None, None)
+        for needle, result in _NAME_INFERENCE_RULES:
+            if needle in folded:
+                return result
+        return (None, None)
+
+    def map_with_fallback(
+        self, source_code: str, raw_category: str | None, name: str | None
+    ) -> CategoryResult:
+        """``map(...)`` first, then ``infer_from_name(name)`` if nothing stuck."""
+        result = self.map(source_code, raw_category)
+        if result == (None, None):
+            return self.infer_from_name(name)
+        return result
