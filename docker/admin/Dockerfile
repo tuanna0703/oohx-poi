@@ -5,7 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DEFAULT_TIMEOUT=300 \
     PIP_RETRIES=5 \
-    PYTHONPATH="/app/src"
+    # Both /app/src (poi_lake.*) and /app (admin.*) need to resolve from the
+    # Streamlit subprocesses that import multi-page modules.
+    PYTHONPATH="/app:/app/src"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl tini \

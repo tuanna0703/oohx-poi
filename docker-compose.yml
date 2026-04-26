@@ -116,6 +116,8 @@ services:
       # Async URL (for symmetry with api) — admin/lib/db.py strips +asyncpg
       DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
       POI_LAKE_API_URL: http://api:8000
+      # /app for the ``admin`` package, /app/src for ``poi_lake``.
+      PYTHONPATH: /app:/app/src
     volumes:
       # Mount source so editing admin/* doesn't require a rebuild.
       - ./admin:/app/admin:ro
