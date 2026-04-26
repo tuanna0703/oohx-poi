@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.db.models import (
+    AdminUnit,
     APIClient,
     IngestionJob,
     IngestionJobStatus,
@@ -37,6 +38,38 @@ from poi_lake.services.api_keys import generate_api_key
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+
+class AdminUnitOut(BaseModel):
+    code: str
+    name: str
+    parent_code: str | None
+    level: int
+    bbox: list[float]
+
+
+@router.get("/admin-units", response_model=list[AdminUnitOut])
+async def list_admin_units(
+    level: int | None = Query(default=None, ge=1, le=3),
+    parent_code: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> list[AdminUnitOut]:
+    """List provinces / districts / wards. Filter by ``level`` (1=province,
+    2=district, 3=ward) and/or ``parent_code`` (e.g. ``parent_code=01``
+    returns Hà Nội's districts)."""
+    stmt = select(AdminUnit).order_by(AdminUnit.level, AdminUnit.code)
+    if level is not None:
+        stmt = stmt.where(AdminUnit.level == level)
+    if parent_code is not None:
+        stmt = stmt.where(AdminUnit.parent_code == parent_code)
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        AdminUnitOut(
+            code=r.code, name=r.name, parent_code=r.parent_code,
+            level=r.level, bbox=r.bbox,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/sources", response_model=list[SourceOut])
@@ -115,16 +148,35 @@ async def list_ingestion_jobs(
 class TiledJobRequest(BaseModel):
     """Tile a bounding box into ``cell_size_m`` × ``cell_size_m`` cells and
     submit one ingestion job per cell. Useful for area sweeps that exceed
-    a single source's per-query result cap (gosom is ~30-40 / keyword)."""
+    a single source's per-query result cap (gosom is ~30-40 / keyword).
+
+    Either ``bbox`` OR ``admin_code`` is required. ``admin_code`` resolves
+    via the ``admin_units`` table — pass a province code (e.g. ``"01"`` for
+    Hà Nội) or a district code (e.g. ``"01.005"`` for Cầu Giấy).
+
+    ``categories`` is a list — one set of jobs per category. Pairs well
+    with the OpenOOH-code translation in GosomScraperAdapter:
+    ``{"categories": ["education.schools", "education.colleges_universities"]}``
+    runs both keyword sets across every cell.
+    """
 
     source_code: str = Field(min_length=1)
-    bbox: list[float] = Field(
+    bbox: list[float] | None = Field(
+        default=None,
         min_length=4, max_length=4,
-        description="[lng_min, lat_min, lng_max, lat_max]",
+        description="[lng_min, lat_min, lng_max, lat_max]; omit if admin_code given",
     )
+    admin_code: str | None = Field(default=None, max_length=20)
     cell_size_m: int = Field(default=5000, ge=200, le=20000)
     category: str | None = None
+    categories: list[str] = Field(default_factory=list, max_length=20)
     max_jobs: int = Field(default=50, ge=1, le=500)
+
+    def effective_categories(self) -> list[str | None]:
+        cats = list(self.categories)
+        if self.category and self.category not in cats:
+            cats.insert(0, self.category)
+        return cats or [None]
 
 
 def _grid_centers(
@@ -184,34 +236,50 @@ async def create_tiled_ingestion_jobs(
     if not src.enabled:
         raise HTTPException(409, f"source {payload.source_code!r} is disabled")
 
-    centers = _grid_centers(payload.bbox, payload.cell_size_m)
+    # Resolve bbox: explicit > admin_code lookup.
+    bbox: list[float] | None = payload.bbox
+    if bbox is None and payload.admin_code:
+        from poi_lake.db.models import AdminUnit
+        au = await session.get(AdminUnit, payload.admin_code)
+        if au is None:
+            raise HTTPException(404, f"admin_code {payload.admin_code!r} not found")
+        bbox = au.bbox
+    if bbox is None:
+        raise HTTPException(400, "either bbox or admin_code is required")
+
+    centers = _grid_centers(bbox, payload.cell_size_m)
     if not centers:
         raise HTTPException(400, "bbox produced zero cells — check coordinate order")
-    if len(centers) > payload.max_jobs:
+
+    categories = payload.effective_categories()
+    total_jobs = len(centers) * len(categories)
+    if total_jobs > payload.max_jobs:
         raise HTTPException(
             400,
-            f"would create {len(centers)} jobs (cap max_jobs={payload.max_jobs}); "
-            f"raise the cap or use a larger cell_size_m",
+            f"would create {total_jobs} jobs ({len(centers)} cells × {len(categories)} "
+            f"categories); cap max_jobs={payload.max_jobs}. Raise the cap or use a "
+            f"larger cell_size_m / fewer categories.",
         )
 
     radius = payload.cell_size_m // 2
     from poi_lake.workers.ingest import run_ingestion_job
 
     job_ids: list[int] = []
-    for lat, lng in centers:
-        params: dict[str, object] = {"lat": lat, "lng": lng, "radius_m": radius}
-        if payload.category:
-            params["category"] = payload.category
-        job = IngestionJob(
-            source_id=src.id,
-            job_type="area_sweep",
-            params=params,
-            status=IngestionJobStatus.PENDING.value,
-            stats={},
-        )
-        session.add(job)
-        await session.flush()
-        job_ids.append(job.id)
+    for cat in categories:
+        for lat, lng in centers:
+            params: dict[str, object] = {"lat": lat, "lng": lng, "radius_m": radius}
+            if cat:
+                params["category"] = cat
+            job = IngestionJob(
+                source_id=src.id,
+                job_type="area_sweep",
+                params=params,
+                status=IngestionJobStatus.PENDING.value,
+                stats={},
+            )
+            session.add(job)
+            await session.flush()
+            job_ids.append(job.id)
     await session.commit()
 
     # Dispatch after commit so workers see the rows.
@@ -219,10 +287,17 @@ async def create_tiled_ingestion_jobs(
         run_ingestion_job.send(jid)
 
     logger.info(
-        "tiled-ingest: %d jobs queued source=%s cells=%d radius=%dm category=%s",
-        len(job_ids), payload.source_code, len(centers), radius, payload.category,
+        "tiled-ingest: %d jobs queued source=%s cells=%d categories=%d radius=%dm",
+        len(job_ids), payload.source_code, len(centers), len(categories), radius,
     )
-    return {"job_ids": job_ids, "count": len(job_ids), "cell_radius_m": radius}
+    return {
+        "job_ids": job_ids,
+        "count": len(job_ids),
+        "cells": len(centers),
+        "categories": len(categories),
+        "cell_radius_m": radius,
+        "bbox": bbox,
+    }
 
 
 @router.post("/dedupe/run", status_code=status.HTTP_202_ACCEPTED)

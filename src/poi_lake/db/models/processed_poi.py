@@ -56,6 +56,9 @@ class ProcessedPOI(Base):
     location: Mapped[Any] = mapped_column(Geography("POINT", srid=4326), nullable=False)
     quality_score: Mapped[float | None] = mapped_column(Numeric(3, 2))
     quality_factors: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    province_code: Mapped[str | None] = mapped_column(String(20))
+    district_code: Mapped[str | None] = mapped_column(String(20))
+    ward_code: Mapped[str | None] = mapped_column(String(20))
     merged_into: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("master_pois.id", ondelete="SET NULL")
     )

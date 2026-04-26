@@ -1,5 +1,6 @@
 """SQLAlchemy ORM models — one module per table."""
 
+from poi_lake.db.models.admin_unit import AdminUnit
 from poi_lake.db.models.api_client import APIClient
 from poi_lake.db.models.brand import Brand
 from poi_lake.db.models.ingestion_job import IngestionJob, IngestionJobStatus, IngestionJobType
@@ -11,6 +12,7 @@ from poi_lake.db.models.raw_poi import RawPOI
 from poi_lake.db.models.source import Source
 
 __all__ = [
+    "AdminUnit",
     "APIClient",
     "Brand",
     "IngestionJob",

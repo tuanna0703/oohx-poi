@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.seeds.openooh_taxonomy import TAXONOMY
 from poi_lake.seeds.sources import SOURCES
+from poi_lake.seeds.vn_admin_units import all_admin_rows
 from poi_lake.seeds.vn_brands import BRANDS
 
 logger = logging.getLogger(__name__)
@@ -106,9 +107,40 @@ async def seed_brands(session: AsyncSession) -> int:
     return len(BRANDS)
 
 
+async def seed_admin_units(session: AsyncSession) -> int:
+    """Idempotent upsert of provinces + districts. Sorted by level so
+    parent FK constraints are satisfied within the same transaction."""
+    sql = text(
+        """
+        INSERT INTO admin_units (
+            code, name, parent_code, level,
+            lng_min, lat_min, lng_max, lat_max
+        ) VALUES (
+            :code, :name, :parent_code, :level,
+            :lng_min, :lat_min, :lng_max, :lat_max
+        )
+        ON CONFLICT (code) DO UPDATE SET
+            name = EXCLUDED.name,
+            parent_code = EXCLUDED.parent_code,
+            level = EXCLUDED.level,
+            lng_min = EXCLUDED.lng_min,
+            lat_min = EXCLUDED.lat_min,
+            lng_max = EXCLUDED.lng_max,
+            lat_max = EXCLUDED.lat_max
+        """
+    )
+    rows = sorted(all_admin_rows(), key=lambda r: r["level"])
+    for row in rows:
+        await session.execute(sql, dict(row))
+    await session.commit()
+    logger.info("Seeded %d admin_units", len(rows))
+    return len(rows)
+
+
 async def seed_all(session: AsyncSession) -> dict[str, int]:
     return {
         "sources": await seed_sources(session),
         "openooh_categories": await seed_openooh_categories(session),
         "brands": await seed_brands(session),
+        "admin_units": await seed_admin_units(session),
     }

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from poi_lake.api.deps import get_session, require_permission
 from poi_lake.db.models import MasterPOI, MasterPOIHistory
 from poi_lake.schemas import (
+    BrandSummary,
     HistoryEntryOut,
     MasterPOIList,
     MasterPOIOut,
@@ -44,6 +45,7 @@ SELECT
   ST_Y(location::geometry) AS lat,
   ST_X(location::geometry) AS lng,
   openooh_category, openooh_subcategory, brand,
+  province_code, district_code, ward_code,
   sources_count, confidence, quality_score, dooh_score,
   status, version, created_at, updated_at
 FROM master_pois
@@ -63,6 +65,9 @@ def _row_to_out(row: Any) -> MasterPOIOut:
         openooh_category=row.openooh_category,
         openooh_subcategory=row.openooh_subcategory,
         brand=row.brand,
+        province_code=row.province_code,
+        district_code=row.district_code,
+        ward_code=row.ward_code,
         sources_count=int(row.sources_count),
         confidence=float(row.confidence),
         quality_score=float(row.quality_score) if row.quality_score is not None else None,
@@ -85,6 +90,9 @@ async def list_master_pois(
     radius_m: int | None = Query(default=None, ge=1, le=200_000),
     category: str | None = Query(default=None),
     brand: str | None = Query(default=None),
+    province_code: str | None = Query(default=None, max_length=20),
+    district_code: str | None = Query(default=None, max_length=20),
+    ward_code: str | None = Query(default=None, max_length=20),
     min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50, ge=1, le=200),
@@ -113,6 +121,15 @@ async def list_master_pois(
     if brand:
         clauses.append("brand = :brand")
         params["brand"] = brand
+    if province_code:
+        clauses.append("province_code = :prov")
+        params["prov"] = province_code
+    if district_code:
+        clauses.append("district_code = :dist")
+        params["dist"] = district_code
+    if ward_code:
+        clauses.append("ward_code = :ward")
+        params["ward"] = ward_code
 
     where = " AND ".join(clauses)
     offset = (page - 1) * per_page
@@ -135,6 +152,65 @@ async def list_master_pois(
         page=page,
         per_page=per_page,
     )
+
+
+@router.get(
+    "/brands",
+    response_model=list[BrandSummary],
+    dependencies=[Depends(require_permission("read:master"))],
+)
+async def list_brands(
+    province_code: str | None = Query(default=None, max_length=20),
+    district_code: str | None = Query(default=None, max_length=20),
+    category: str | None = Query(default=None),
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+) -> list[BrandSummary]:
+    """Group active master POIs by ``brand`` and return counts.
+
+    Optional admin / category filters scope the aggregation. Brands with
+    only one master are still returned — the ``count = 1`` case is the
+    "long tail" that the AdTRUE inventory tool wants to know about.
+    """
+    clauses = ["status = 'active'", "brand IS NOT NULL", "confidence >= :mc"]
+    params: dict[str, Any] = {"mc": min_confidence, "lim": limit}
+    if province_code:
+        clauses.append("province_code = :prov")
+        params["prov"] = province_code
+    if district_code:
+        clauses.append("district_code = :dist")
+        params["dist"] = district_code
+    if category:
+        clauses.append("(openooh_category = :cat OR openooh_subcategory = :cat)")
+        params["cat"] = category
+    where = " AND ".join(clauses)
+
+    sql = text(
+        f"""
+        SELECT
+            brand,
+            COUNT(*) AS n,
+            (ARRAY_AGG(openooh_subcategory ORDER BY openooh_subcategory)
+                FILTER (WHERE openooh_subcategory IS NOT NULL))[1] AS category,
+            (ARRAY_AGG(id::text ORDER BY confidence DESC))[1:3]   AS sample_ids
+        FROM master_pois
+        WHERE {where}
+        GROUP BY brand
+        ORDER BY n DESC, brand ASC
+        LIMIT :lim
+        """
+    )
+    rows = (await session.execute(sql, params)).all()
+    return [
+        BrandSummary(
+            brand=r.brand,
+            count=int(r.n),
+            category=r.category,
+            sample_master_ids=list(r.sample_ids) if r.sample_ids else [],
+        )
+        for r in rows
+    ]
 
 
 @router.get(
@@ -248,6 +324,15 @@ async def search_master_pois(
     if body.brand:
         clauses.append("brand = :brand")
         params["brand"] = body.brand
+    if body.province_code:
+        clauses.append("province_code = :prov")
+        params["prov"] = body.province_code
+    if body.district_code:
+        clauses.append("district_code = :dist")
+        params["dist"] = body.district_code
+    if body.ward_code:
+        clauses.append("ward_code = :ward")
+        params["ward"] = body.ward_code
 
     where = " AND ".join(clauses)
     offset = (body.page - 1) * body.per_page

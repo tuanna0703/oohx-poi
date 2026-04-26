@@ -53,6 +53,9 @@ class MasterPOI(Base):
     openooh_category: Mapped[str | None] = mapped_column(String(50))
     openooh_subcategory: Mapped[str | None] = mapped_column(String(100))
     brand: Mapped[str | None] = mapped_column(String(100))
+    province_code: Mapped[str | None] = mapped_column(String(20))
+    district_code: Mapped[str | None] = mapped_column(String(20))
+    ward_code: Mapped[str | None] = mapped_column(String(20))
     source_refs: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, server_default="[]"
     )

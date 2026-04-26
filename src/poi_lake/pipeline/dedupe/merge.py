@@ -374,6 +374,23 @@ class MergeService:
         ).one()
         lat, lng = float(centroid[0]), float(centroid[1])
 
+        # Admin codes: take the most common across members, falling back to
+        # the canonical-name member's value (which itself was normalised
+        # against admin_units bbox at ingest time).
+        def _mode(values: list[str | None]) -> str | None:
+            seen = [v for v in values if v]
+            if not seen:
+                return None
+            from collections import Counter
+            return Counter(seen).most_common(1)[0][0]
+
+        province_code = _mode([m.province_code for m in members]) \
+            or canonical_name_row.province_code
+        district_code = _mode([m.district_code for m in members]) \
+            or canonical_name_row.district_code
+        ward_code = _mode([m.ward_code for m in members]) \
+            or canonical_name_row.ward_code
+
         master_id_sql = text(
             """
             INSERT INTO master_pois (
@@ -382,6 +399,7 @@ class MergeService:
                 canonical_phone, canonical_website,
                 location,
                 openooh_category, openooh_subcategory, brand,
+                province_code, district_code, ward_code,
                 source_refs, merged_processed_ids,
                 confidence, quality_score, status, version
             ) VALUES (
@@ -390,6 +408,7 @@ class MergeService:
                 :phone, :web,
                 ST_GeogFromText(:wkt),
                 :cat, :subcat, :brand,
+                :prov, :dist, :ward,
                 CAST(:srcrefs AS JSONB), CAST(:procids AS BIGINT[]),
                 :conf, :q, :status, 1
             )
@@ -412,6 +431,9 @@ class MergeService:
                 "cat": canonical["openooh_category"],
                 "subcat": canonical["openooh_subcategory"],
                 "brand": canonical["brand"],
+                "prov": province_code,
+                "dist": district_code,
+                "ward": ward_code,
                 "srcrefs": _json.dumps(source_refs),
                 "procids": [r.id for r in members],
                 "conf": canonical["confidence"],

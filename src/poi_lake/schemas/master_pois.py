@@ -34,6 +34,10 @@ class MasterPOIOut(BaseModel):
     quality_score: float | None = None
     dooh_score: float | None = None
 
+    province_code: str | None = None
+    district_code: str | None = None
+    ward_code: str | None = None
+
     status: str
     version: int
     created_at: datetime
@@ -78,6 +82,16 @@ class SearchRequest(BaseModel):
     )
     category: str | None = None
     brand: str | None = None
+    province_code: str | None = None
+    district_code: str | None = None
+    ward_code: str | None = None
     min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     page: int = Field(default=1, ge=1)
     per_page: int = Field(default=50, ge=1, le=200)
+
+
+class BrandSummary(BaseModel):
+    brand: str
+    count: int
+    category: str | None = None
+    sample_master_ids: list[str] = Field(default_factory=list)

@@ -7,6 +7,8 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from admin.lib.queries import (
+    admin_districts,
+    admin_provinces,
     brands_with_counts,
     categories_with_counts,
     master_pois_for_map,
@@ -19,7 +21,31 @@ st.title("POI Explorer")
 
 with st.sidebar:
     st.header("Filters")
-    use_radius = st.checkbox("Radius search", value=True)
+
+    # Administrative unit filters take precedence over radius — easier to
+    # think in terms of "Cầu Giấy district" than lat/lng.
+    provs = admin_provinces()
+    prov_label = st.selectbox(
+        "Province",
+        options=["(any)"] + [f"{r.code} — {r['name']}" for _, r in provs.iterrows()],
+    )
+    province_code = (
+        None if prov_label == "(any)" else prov_label.split(" — ", 1)[0]
+    )
+
+    dist_options = ["(any)"]
+    if province_code:
+        dists = admin_districts(province_code)
+        dist_options += [f"{r.code} — {r['name']}" for _, r in dists.iterrows()]
+    dist_label = st.selectbox("District", options=dist_options)
+    district_code = (
+        None if dist_label == "(any)" else dist_label.split(" — ", 1)[0]
+    )
+
+    use_radius = st.checkbox(
+        "Radius search (overrides admin filter for centring)",
+        value=False,
+    )
     if use_radius:
         lat = st.number_input("lat", value=21.0285, format="%.6f")
         lng = st.number_input("lng", value=105.8542, format="%.6f")
@@ -50,6 +76,8 @@ df = master_pois_for_map(
     lat=lat, lng=lng, radius_m=int(radius_m) if radius_m else None,
     category=None if cat_choice == "(any)" else cat_choice,
     brand=None if brand_choice == "(any)" else brand_choice,
+    province_code=province_code,
+    district_code=district_code,
     min_confidence=min_conf,
     limit=limit,
 )

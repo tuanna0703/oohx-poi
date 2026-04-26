@@ -113,6 +113,8 @@ def master_pois_for_map(
     radius_m: int | None = None,
     category: str | None = None,
     brand: str | None = None,
+    province_code: str | None = None,
+    district_code: str | None = None,
     min_confidence: float = 0.0,
     limit: int = 500,
 ) -> pd.DataFrame:
@@ -128,6 +130,12 @@ def master_pois_for_map(
     if brand:
         clauses.append("brand = :brand")
         params["brand"] = brand
+    if province_code:
+        clauses.append("province_code = :prov")
+        params["prov"] = province_code
+    if district_code:
+        clauses.append("district_code = :dist")
+        params["dist"] = district_code
     where = " AND ".join(clauses)
     sql = f"""
     SELECT id, canonical_name, brand,
@@ -135,10 +143,65 @@ def master_pois_for_map(
            ST_Y(location::geometry) AS lat,
            ST_X(location::geometry) AS lng,
            sources_count, confidence,
-           canonical_address, canonical_phone, canonical_website
+           canonical_address, canonical_phone, canonical_website,
+           province_code, district_code
     FROM master_pois
     WHERE {where}
     ORDER BY confidence DESC, updated_at DESC
+    LIMIT :lim
+    """
+    return _df(sql, **params)
+
+
+@st.cache_data(ttl=30)
+def admin_provinces() -> pd.DataFrame:
+    return _df(
+        "SELECT code, name FROM admin_units WHERE level = 1 ORDER BY name"
+    )
+
+
+@st.cache_data(ttl=30)
+def admin_districts(province_code: str | None) -> pd.DataFrame:
+    if not province_code:
+        return pd.DataFrame(columns=["code", "name"])
+    return _df(
+        "SELECT code, name FROM admin_units WHERE level=2 AND parent_code=:p ORDER BY name",
+        p=province_code,
+    )
+
+
+@st.cache_data(ttl=15)
+def brand_summary(
+    *,
+    province_code: str | None = None,
+    district_code: str | None = None,
+    category: str | None = None,
+    min_confidence: float = 0.0,
+    limit: int = 200,
+) -> pd.DataFrame:
+    clauses = ["status='active'", "brand IS NOT NULL", "confidence >= :mc"]
+    params: dict[str, Any] = {"mc": min_confidence, "lim": limit}
+    if province_code:
+        clauses.append("province_code = :prov")
+        params["prov"] = province_code
+    if district_code:
+        clauses.append("district_code = :dist")
+        params["dist"] = district_code
+    if category:
+        clauses.append("(openooh_category = :cat OR openooh_subcategory = :cat)")
+        params["cat"] = category
+    where = " AND ".join(clauses)
+    sql = f"""
+    SELECT
+        brand,
+        COUNT(*) AS n,
+        (ARRAY_AGG(openooh_subcategory ORDER BY openooh_subcategory)
+            FILTER (WHERE openooh_subcategory IS NOT NULL))[1] AS category,
+        AVG(confidence) AS avg_confidence
+    FROM master_pois
+    WHERE {where}
+    GROUP BY brand
+    ORDER BY n DESC, brand ASC
     LIMIT :lim
     """
     return _df(sql, **params)

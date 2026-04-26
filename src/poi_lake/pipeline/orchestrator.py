@@ -24,6 +24,7 @@ from poi_lake.db.models import ProcessedPOI, RawPOI, Source
 from poi_lake.observability import NORMALIZE_PROCESSED_INSERTED
 from poi_lake.observability.metrics import NORMALIZE_SKIPPED
 from poi_lake.pipeline.embed import EmbeddingService, get_embedding_service
+from poi_lake.services.admin_geo import lookup_admin
 from poi_lake.pipeline.extractors import get_extractor
 from poi_lake.pipeline.normalize import (
     AddressNormalizer,
@@ -145,6 +146,13 @@ class NormalizePipeline:
 
         website_domain = self._extract_domain(canonical.website)
 
+        # Spatial admin-unit stamp: which province / district / ward contains
+        # this point? Bbox lookup is a single indexed range scan.
+        if canonical.location is not None:
+            admin = await lookup_admin(session, canonical.location[0], canonical.location[1])
+        else:
+            admin = await lookup_admin(session, 0.0, 0.0)  # all None
+
         # Idempotency: skip if this raw_poi already produced a processed_poi.
         # (We don't have a unique index on raw_poi_id by design — Phase 4
         # might want to reprocess on schema upgrades — so dedup at insert time.)
@@ -176,6 +184,9 @@ class NormalizePipeline:
                 raw_category=canonical.raw_category,
                 brand=brand_match.name if brand_match else None,
                 brand_confidence=brand_match.confidence if brand_match else None,
+                province_code=admin.province_code,
+                district_code=admin.district_code,
+                ward_code=admin.ward_code,
                 location=location_wkt,
                 quality_score=composite,
                 quality_factors=factors_to_dict(factors),
