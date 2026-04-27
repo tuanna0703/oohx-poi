@@ -1,0 +1,15 @@
+# Force LF line endings for shell scripts and Dockerfiles regardless of
+# the contributor's OS. Without this, scripts authored on Windows ship
+# with CRLF and break ``bash: /usr/bin/env: bad interpreter`` on Linux.
+
+*.sh         text eol=lf
+*.bash       text eol=lf
+Dockerfile   text eol=lf
+*.Dockerfile text eol=lf
+Caddyfile    text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.toml       text eol=lf
+
+# Default — let git decide based on file type detection
+*            text=auto
