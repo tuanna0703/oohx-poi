@@ -149,21 +149,38 @@ with st.expander("Trigger a new job", expanded=True):
     else:  # Tiled · admin unit
         provs = _provinces()
         c1, c2, c3 = st.columns([2, 2, 1])
-        prov_label = c1.selectbox(
-            "Province",
+        prov_labels = c1.multiselect(
+            "Provinces",
             options=[f"{r.code} — {r['name']}" for _, r in provs.iterrows()],
+            help="Pick one or more provinces. Districts dropdown will show "
+                 "the union of districts across all picked provinces.",
         )
-        prov_code = prov_label.split(" — ", 1)[0]
-        dists = _districts(prov_code)
-        dist_options = ["(whole province)"] + [
-            f"{r.code} — {r['name']}" for _, r in dists.iterrows()
-        ]
-        dist_label = c2.selectbox("District", options=dist_options)
+        prov_codes = [lbl.split(" — ", 1)[0] for lbl in prov_labels]
+
+        # Build the district options across all picked provinces.
+        dist_options: list[str] = []
+        for pc in prov_codes:
+            for _, r in _districts(pc).iterrows():
+                dist_options.append(f"{r.code} — {r['name']}")
+        dist_labels = c2.multiselect(
+            "Districts (optional)",
+            options=dist_options,
+            help="Leave empty = sweep entire province(s). Pick specific "
+                 "districts to narrow scope (e.g. just inner-city Hà Nội).",
+        )
+        dist_codes = [lbl.split(" — ", 1)[0] for lbl in dist_labels]
+
         cell_size_m = c3.number_input("cell_size_m", 500, 20000, 4000, step=500)
-        admin_code = (
-            prov_code if dist_label == "(whole province)"
-            else dist_label.split(" — ", 1)[0]
-        )
+
+        # Send districts if user picked any, else fall back to the picked
+        # provinces themselves (whole-province sweep).
+        chosen_admin_codes = dist_codes if dist_codes else prov_codes
+
+        if not chosen_admin_codes:
+            st.info("Pick at least one province to enable submit.")
+        # ``admin_code`` (single) is kept None so the request body uses
+        # ``admin_codes`` instead.
+        admin_code = None
 
     # ---- Category / brand multiselect -----------------------------------
     st.markdown("---")
@@ -249,16 +266,24 @@ with st.expander("Trigger a new job", expanded=True):
     if mode != "Single cell":
         try:
             from poi_lake.api.v1.admin import _grid_centers
-            preview_bbox = bbox
-            if admin_code and not preview_bbox:
-                preview_bbox = _bbox_for_admin(admin_code)
-            if preview_bbox:
-                cells = _grid_centers(preview_bbox, int(cell_size_m))
+            total_cells = 0
+            if bbox is not None:
+                total_cells = len(_grid_centers(bbox, int(cell_size_m)))
+            else:
+                for code in chosen_admin_codes:
+                    bb = _bbox_for_admin(code)
+                    if bb:
+                        total_cells += len(_grid_centers(bb, int(cell_size_m)))
+            if total_cells:
                 cat_n = max(1, len(chosen_categories))
                 src_n = len(chosen_sources)
-                estimated_total = len(cells) * cat_n * src_n
+                estimated_total = total_cells * cat_n * src_n
+                regions_note = (
+                    f"{len(chosen_admin_codes)} regions" if mode == "Tiled · admin unit"
+                    else "1 bbox"
+                )
                 st.caption(
-                    f"≈ **{len(cells)} cells × {cat_n} categories × "
+                    f"≈ **{total_cells} cells ({regions_note}) × {cat_n} categories × "
                     f"{src_n} sources = {estimated_total} jobs** "
                     f"(cell radius ~{int(cell_size_m)//2}m)"
                 )
@@ -318,11 +343,18 @@ with st.expander("Trigger a new job", expanded=True):
                 if mode == "Tiled · bbox":
                     body["bbox"] = bbox
                 else:
-                    body["admin_code"] = admin_code
+                    if not chosen_admin_codes:
+                        raise RuntimeError("pick at least one province / district first")
+                    body["admin_codes"] = chosen_admin_codes
                 resp = post_json("/api/v1/admin/ingestion-jobs/tiled", body=body)
+                regions = (
+                    f"{len(resp.get('admin_codes', []))} regions"
+                    if resp.get("admin_codes") else "1 bbox"
+                )
                 st.success(
                     f"{resp['count']} jobs enqueued · "
-                    f"{resp['cells']} cells × {resp['categories']} cats × "
+                    f"{resp['cells']} cells ({regions}) × "
+                    f"{resp['categories']} cats × "
                     f"{resp.get('sources', 1)} sources · "
                     f"radius {resp['cell_radius_m']}m"
                 )

@@ -172,7 +172,12 @@ class TiledJobRequest(BaseModel):
         min_length=4, max_length=4,
         description="[lng_min, lat_min, lng_max, lat_max]; omit if admin_code given",
     )
+    # Single admin_code kept for backward compat. ``admin_codes`` lets the
+    # caller pick multiple provinces / districts in one request — bboxes
+    # are computed per region and cells emitted for each, so jobs cover
+    # only the actual admin areas (no wasted cells between separated regions).
     admin_code: str | None = Field(default=None, max_length=20)
+    admin_codes: list[str] = Field(default_factory=list, max_length=70)
     cell_size_m: int = Field(default=5000, ge=200, le=20000)
     category: str | None = None
     categories: list[str] = Field(default_factory=list, max_length=20)
@@ -191,6 +196,12 @@ class TiledJobRequest(BaseModel):
         if not srcs:
             raise ValueError("at least one of source_code / source_codes is required")
         return srcs
+
+    def effective_admin_codes(self) -> list[str]:
+        codes = list(self.admin_codes)
+        if self.admin_code and self.admin_code not in codes:
+            codes.insert(0, self.admin_code)
+        return codes
 
 
 def _grid_centers(
@@ -253,28 +264,46 @@ async def create_tiled_ingestion_jobs(
             select(Source).where(Source.code.in_(source_codes))
         )
     ).scalars().all()
-    found = {s.code: s for s in src_rows}
-    missing = [c for c in source_codes if c not in found]
+    sources_by_code = {s.code: s for s in src_rows}
+    missing = [c for c in source_codes if c not in sources_by_code]
     if missing:
         raise HTTPException(404, f"sources not found: {missing}")
-    disabled = [c for c, s in found.items() if not s.enabled]
+    disabled = [c for c, s in sources_by_code.items() if not s.enabled]
     if disabled:
         raise HTTPException(409, f"sources disabled: {disabled}")
 
-    # Resolve bbox: explicit > admin_code lookup.
-    bbox: list[float] | None = payload.bbox
-    if bbox is None and payload.admin_code:
-        from poi_lake.db.models import AdminUnit
-        au = await session.get(AdminUnit, payload.admin_code)
-        if au is None:
-            raise HTTPException(404, f"admin_code {payload.admin_code!r} not found")
-        bbox = au.bbox
-    if bbox is None:
-        raise HTTPException(400, "either bbox or admin_code is required")
+    # Resolve cells: bbox (single) OR admin_codes (one or more).
+    admin_codes = payload.effective_admin_codes()
+    centers: list[tuple[float, float]] = []
+    bbox_for_response: list[float] | None = None
 
-    centers = _grid_centers(bbox, payload.cell_size_m)
+    if payload.bbox is not None:
+        # Explicit bbox path — single rectangle, no admin lookup.
+        centers = _grid_centers(payload.bbox, payload.cell_size_m)
+        bbox_for_response = payload.bbox
+    elif admin_codes:
+        # Per-region cells. Each picked province / district contributes its
+        # own grid; concatenating gives a non-rectangular coverage that
+        # respects political boundaries instead of one huge bbox spanning
+        # gaps.
+        from poi_lake.db.models import AdminUnit
+        admin_rows = (
+            await session.execute(
+                select(AdminUnit).where(AdminUnit.code.in_(admin_codes))
+            )
+        ).scalars().all()
+        admins_by_code = {r.code: r for r in admin_rows}
+        missing_admin = [c for c in admin_codes if c not in admins_by_code]
+        if missing_admin:
+            raise HTTPException(404, f"admin_codes not found: {missing_admin}")
+        for code in admin_codes:
+            au = admins_by_code[code]
+            centers.extend(_grid_centers(au.bbox, payload.cell_size_m))
+    else:
+        raise HTTPException(400, "either bbox or admin_code(s) is required")
+
     if not centers:
-        raise HTTPException(400, "bbox produced zero cells — check coordinate order")
+        raise HTTPException(400, "no cells produced — check coordinates / cell_size_m")
 
     categories = payload.effective_categories()
     total_jobs = len(centers) * len(categories) * len(source_codes)
@@ -292,7 +321,7 @@ async def create_tiled_ingestion_jobs(
 
     job_ids: list[int] = []
     for src_code in source_codes:
-        src = found[src_code]
+        src = sources_by_code[src_code]
         for cat in categories:
             for lat, lng in centers:
                 params: dict[str, object] = {"lat": lat, "lng": lng, "radius_m": radius}
@@ -325,8 +354,9 @@ async def create_tiled_ingestion_jobs(
         "categories": len(categories),
         "sources": len(source_codes),
         "source_codes": source_codes,
+        "admin_codes": admin_codes,
         "cell_radius_m": radius,
-        "bbox": bbox,
+        "bbox": bbox_for_response,
     }
 
 
