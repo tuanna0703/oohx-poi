@@ -1,0 +1,87 @@
+# Caddy reverse proxy for POI Lake.
+#
+# Auto-TLS via Let's Encrypt (HTTP-01 + TLS-ALPN-01). Caddy acquires and
+# renews certs by itself — just point your DNS A/AAAA records at the VPS
+# and open ports 80 + 443.
+#
+# Domains are templated via env vars so the same file works for staging
+# and prod. Set them in .env.production:
+#
+#   CADDY_API_HOST=api.poi.oohx.net
+#   CADDY_ADMIN_HOST=admin.poi.oohx.net
+#   ACME_EMAIL=ops@oohx.net
+#
+# Bring up with the prod overlay:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml \
+#                  -f docker-compose.caddy.yml up -d caddy
+
+{
+    email {$ACME_EMAIL}
+    # Enable structured access logs as JSON to stdout — picked up by `docker logs`.
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+# ---------------- Public API (consumer-facing) ----------------------------
+#
+# Exposed surface: /api/v1/master-pois/* + /docs + /openapi.json + /health.
+# Everything else (admin, metrics) is denied.
+
+{$CADDY_API_HOST} {
+    encode zstd gzip
+
+    # Block admin endpoints from the public hostname even if someone has the
+    # token. Internal callers go through the private docker network instead.
+    @admin path /api/v1/admin* /metrics
+    respond @admin "not found" 404
+
+    # Cache OpenAPI/docs for an hour — small files, big traffic spikes.
+    @docs path /docs /redoc /openapi.json
+    header @docs Cache-Control "public, max-age=3600"
+
+    reverse_proxy api:8000 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        # Trip Caddy's circuit on a slow upstream so a stuck process doesn't
+        # eat all our connections.
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+        }
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}
+
+# ---------------- Admin (internal) ----------------------------------------
+#
+# Streamlit + a Basic-auth gate. Streamlit's WebSocket needs HTTP/1.1 with
+# Connection: upgrade — `reverse_proxy` handles that automatically.
+# The Basic-auth credentials are a defense-in-depth layer; the app still
+# uses the X-Admin-Token internally.
+
+{$CADDY_ADMIN_HOST} {
+    encode zstd gzip
+
+    basicauth {
+        # Generate hash with: docker run --rm caddy:2 caddy hash-password
+        admin {$ADMIN_BASIC_AUTH_HASH}
+    }
+
+    reverse_proxy admin:8501 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}

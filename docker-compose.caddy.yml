@@ -1,0 +1,48 @@
+# Caddy reverse proxy overlay — bind on 80/443 and front the api + admin
+# services. Apply on top of the prod compose:
+#
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml \
+#                  -f docker-compose.caddy.yml up -d
+#
+# Caddy auto-renews TLS certs from Let's Encrypt; persistent storage is in
+# the named volume ``poi_caddy_data`` (don't lose it — re-issuing certs is
+# rate-limited by LE).
+
+name: poi-lake
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: poi-lake-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - poi_caddy_data:/data
+      - poi_caddy_config:/config
+    environment:
+      CADDY_API_HOST: ${CADDY_API_HOST:?set CADDY_API_HOST in .env}
+      CADDY_ADMIN_HOST: ${CADDY_ADMIN_HOST:?set CADDY_ADMIN_HOST in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env for Let's Encrypt}
+      ADMIN_BASIC_AUTH_HASH: ${ADMIN_BASIC_AUTH_HASH:?run "docker run --rm caddy:2 caddy hash-password"}
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+  # Stop publishing api / admin ports on the host — Caddy reaches them on
+  # the docker network and the public ingress is :443 only.
+  api:
+    ports: !reset []
+
+  admin:
+    ports: !reset []
+
+volumes:
+  poi_caddy_data:
+    name: poi_caddy_data
+  poi_caddy_config:
+    name: poi_caddy_config

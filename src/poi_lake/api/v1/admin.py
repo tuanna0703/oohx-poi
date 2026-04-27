@@ -16,7 +16,7 @@ from datetime import datetime as _dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
@@ -31,6 +31,8 @@ from poi_lake.schemas import (
     CreateIngestionJob,
     IngestionJobOut,
     IngestionJobsList,
+    RawPOIList,
+    RawPOIOut,
     SourceOut,
 )
 from poi_lake.services.api_keys import generate_api_key
@@ -170,7 +172,7 @@ class TiledJobRequest(BaseModel):
     cell_size_m: int = Field(default=5000, ge=200, le=20000)
     category: str | None = None
     categories: list[str] = Field(default_factory=list, max_length=20)
-    max_jobs: int = Field(default=50, ge=1, le=500)
+    max_jobs: int = Field(default=50, ge=1, le=2000)
 
     def effective_categories(self) -> list[str | None]:
         cats = list(self.categories)
@@ -298,6 +300,159 @@ async def create_tiled_ingestion_jobs(
         "cell_radius_m": radius,
         "bbox": bbox,
     }
+
+
+# --------------------------------------------------------------- raw_pois
+#
+# Bronze layer surfaced for admin debugging only — pre-dedupe rows, often
+# duplicated across sources / time. Public consumers should hit the
+# ``master_pois`` API instead.
+
+
+@router.get("/raw-pois", response_model=RawPOIList)
+async def list_raw_pois(
+    source_code: str | None = Query(default=None, description="filter by sources.code"),
+    ingestion_job_id: int | None = Query(default=None, ge=1),
+    processed: bool | None = Query(
+        default=None,
+        description="True = already normalized, False = still pending, omit = all",
+    ),
+    has_location: bool | None = Query(
+        default=None, description="True = lat/lng present, False = missing"
+    ),
+    bbox: str | None = Query(
+        default=None,
+        description="lng_min,lat_min,lng_max,lat_max (comma-sep)",
+    ),
+    fetched_since: datetime | None = Query(
+        default=None, description="ISO timestamp; rows fetched_at >= this"
+    ),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+) -> RawPOIList:
+    """List raw_pois with admin filters. Used by the admin UI's *Raw POIs*
+    page to verify what an adapter actually pulled in, and to find rows
+    stuck in pre-normalize state."""
+    clauses: list[str] = []
+    bind_params: dict[str, object] = {}
+
+    if source_code:
+        # Resolve once via subquery — keeps the main query a single statement.
+        clauses.append("r.source_id = (SELECT id FROM sources WHERE code = :sc)")
+        bind_params["sc"] = source_code
+    if ingestion_job_id is not None:
+        clauses.append("r.ingestion_job_id = :jid")
+        bind_params["jid"] = ingestion_job_id
+    if processed is True:
+        clauses.append("r.processed_at IS NOT NULL")
+    elif processed is False:
+        clauses.append("r.processed_at IS NULL")
+    if has_location is True:
+        clauses.append("r.location IS NOT NULL")
+    elif has_location is False:
+        clauses.append("r.location IS NULL")
+    if fetched_since is not None:
+        clauses.append("r.fetched_at >= :since")
+        bind_params["since"] = fetched_since
+    if bbox:
+        try:
+            parts = [float(x) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError
+            lng_min, lat_min, lng_max, lat_max = parts
+        except ValueError:
+            raise HTTPException(400, "bbox must be 'lng_min,lat_min,lng_max,lat_max'")
+        clauses.append(
+            "ST_Within(r.location::geometry, "
+            "ST_MakeEnvelope(:bb_lng_min, :bb_lat_min, :bb_lng_max, :bb_lat_max, 4326))"
+        )
+        bind_params.update({
+            "bb_lng_min": lng_min, "bb_lat_min": lat_min,
+            "bb_lng_max": lng_max, "bb_lat_max": lat_max,
+        })
+
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    offset = (page - 1) * per_page
+
+    list_sql = text(
+        f"""
+        SELECT r.id, r.source_id, s.code AS source_code,
+               r.source_poi_id, r.raw_payload, r.content_hash,
+               ST_Y(r.location::geometry) AS lat,
+               ST_X(r.location::geometry) AS lng,
+               r.fetched_at, r.ingestion_job_id, r.processed_at
+        FROM raw_pois r
+        JOIN sources s ON s.id = r.source_id
+        {where_sql}
+        ORDER BY r.fetched_at DESC, r.id DESC
+        LIMIT :lim OFFSET :off
+        """
+    )
+    count_sql = text(
+        f"SELECT COUNT(*) FROM raw_pois r JOIN sources s ON s.id = r.source_id {where_sql}"
+    )
+
+    rows = (
+        await session.execute(list_sql, {**bind_params, "lim": per_page, "off": offset})
+    ).all()
+    total = (await session.execute(count_sql, bind_params)).scalar_one()
+
+    items = [
+        RawPOIOut(
+            id=int(r.id),
+            source_id=int(r.source_id),
+            source_code=r.source_code,
+            source_poi_id=r.source_poi_id,
+            raw_payload=r.raw_payload or {},
+            content_hash=r.content_hash,
+            lat=float(r.lat) if r.lat is not None else None,
+            lng=float(r.lng) if r.lng is not None else None,
+            fetched_at=r.fetched_at,
+            ingestion_job_id=r.ingestion_job_id,
+            processed_at=r.processed_at,
+        )
+        for r in rows
+    ]
+    return RawPOIList(items=items, total=int(total), page=page, per_page=per_page)
+
+
+@router.get("/raw-pois/{raw_id}", response_model=RawPOIOut)
+async def get_raw_poi(
+    raw_id: int, session: AsyncSession = Depends(get_session)
+) -> RawPOIOut:
+    """Single raw POI by id — surfaces the full raw_payload for inspection."""
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT r.id, r.source_id, s.code AS source_code,
+                       r.source_poi_id, r.raw_payload, r.content_hash,
+                       ST_Y(r.location::geometry) AS lat,
+                       ST_X(r.location::geometry) AS lng,
+                       r.fetched_at, r.ingestion_job_id, r.processed_at
+                FROM raw_pois r JOIN sources s ON s.id = r.source_id
+                WHERE r.id = :id
+                """
+            ),
+            {"id": raw_id},
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(404, f"raw_poi {raw_id} not found")
+    return RawPOIOut(
+        id=int(row.id),
+        source_id=int(row.source_id),
+        source_code=row.source_code,
+        source_poi_id=row.source_poi_id,
+        raw_payload=row.raw_payload or {},
+        content_hash=row.content_hash,
+        lat=float(row.lat) if row.lat is not None else None,
+        lng=float(row.lng) if row.lng is not None else None,
+        fetched_at=row.fetched_at,
+        ingestion_job_id=row.ingestion_job_id,
+        processed_at=row.processed_at,
+    )
 
 
 @router.post("/dedupe/run", status_code=status.HTTP_202_ACCEPTED)

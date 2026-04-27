@@ -13,6 +13,7 @@ from poi_lake.schemas.master_pois import (
     SearchRequest,
     SourceRefOut,
 )
+from poi_lake.schemas.raw_pois import RawPOIList, RawPOIOut
 from poi_lake.schemas.sources import SourceOut
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "IngestionJobsList",
     "MasterPOIList",
     "MasterPOIOut",
+    "RawPOIList",
+    "RawPOIOut",
     "SearchRequest",
     "SourceOut",
     "SourceRefOut",

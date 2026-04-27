@@ -41,7 +41,9 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
 
     Using ``request.scope['route']`` keeps the cardinality bounded — a path
     like ``/api/v1/master-pois/{master_id}`` is one label value across all
-    UUIDs, not millions.
+    UUIDs, not millions. Also copies any ``request.state.rate_limit_headers``
+    set by the rate-limit dependency onto the response so consumers can
+    self-throttle.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -60,6 +62,10 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
             HTTP_REQUESTS.labels(
                 request.method, template, _status_class(status_code)
             ).inc()
+        rl_headers = getattr(request.state, "rate_limit_headers", None)
+        if rl_headers:
+            for k, v in rl_headers.items():
+                response.headers[k] = v
         return response
 
 

@@ -232,7 +232,9 @@ with st.expander("Trigger a new job", expanded=True):
         for c in chosen_categories[:8]:
             st.info(_format_keyword_preview(source_code, c))
 
-    if mode != "Single cell" and chosen_categories:
+    # Estimated job count + max_jobs cap (only relevant for tiled modes).
+    estimated_total: int | None = None
+    if mode != "Single cell":
         try:
             from poi_lake.api.v1.admin import _grid_centers
             preview_bbox = bbox
@@ -240,13 +242,30 @@ with st.expander("Trigger a new job", expanded=True):
                 preview_bbox = _bbox_for_admin(admin_code)
             if preview_bbox:
                 cells = _grid_centers(preview_bbox, int(cell_size_m))
-                total = len(cells) * len(chosen_categories)
+                cat_n = max(1, len(chosen_categories))
+                estimated_total = len(cells) * cat_n
                 st.caption(
-                    f"≈ **{len(cells)} cells × {len(chosen_categories)} categories = "
-                    f"{total} jobs** (cell radius ~{int(cell_size_m)//2}m)"
+                    f"≈ **{len(cells)} cells × {cat_n} categories = "
+                    f"{estimated_total} jobs** (cell radius ~{int(cell_size_m)//2}m)"
                 )
         except Exception:  # noqa: BLE001
             pass
+
+    cap_default = max(300, (estimated_total or 0) + 50)
+    max_jobs = st.slider(
+        "Max jobs (cap)",
+        min_value=10,
+        max_value=2000,
+        value=min(2000, cap_default),
+        step=50,
+        help="Backend rejects the request if cells × categories exceeds this. "
+             "Bump it for province-wide sweeps; keep it low while testing.",
+    )
+    if estimated_total and estimated_total > max_jobs:
+        st.warning(
+            f"Estimated {estimated_total} jobs > cap {max_jobs} — "
+            f"raise the cap, pick a larger cell_size_m, or fewer categories."
+        )
 
     # ---- Submit ----------------------------------------------------------
     if st.button("Submit", type="primary"):
@@ -269,7 +288,7 @@ with st.expander("Trigger a new job", expanded=True):
                     "source_code": source_code,
                     "cell_size_m": int(cell_size_m),
                     "categories": chosen_categories,
-                    "max_jobs": 300,
+                    "max_jobs": int(max_jobs),
                 }
                 if mode == "Tiled · bbox":
                     body["bbox"] = bbox

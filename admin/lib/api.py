@@ -33,13 +33,39 @@ def _request(method: str, path: str, **kwargs) -> httpx.Response:
         return c.request(method, url, headers=headers, **kwargs)
 
 
+class APIError(RuntimeError):
+    """HTTP error that carries the API's ``detail`` field when present, so
+    Streamlit can show *why* a request was rejected instead of a generic
+    ``400 Bad Request``."""
+
+    def __init__(self, status_code: int, detail: str, url: str) -> None:
+        super().__init__(f"{status_code} — {detail}")
+        self.status_code = status_code
+        self.detail = detail
+        self.url = url
+
+
+def _raise_for_status(r: httpx.Response) -> None:
+    if r.is_success:
+        return
+    detail: str
+    try:
+        body = r.json()
+        detail = body.get("detail") if isinstance(body, dict) else str(body)
+        if not isinstance(detail, str):
+            detail = str(detail)
+    except Exception:  # noqa: BLE001
+        detail = (r.text or "").strip() or r.reason_phrase
+    raise APIError(r.status_code, detail, str(r.request.url))
+
+
 def post_json(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     r = _request("POST", path, json=body or {})
-    r.raise_for_status()
+    _raise_for_status(r)
     return r.json() if r.content else {}
 
 
 def get_json(path: str, params: dict[str, Any] | None = None) -> Any:
     r = _request("GET", path, params=params)
-    r.raise_for_status()
+    _raise_for_status(r)
     return r.json()
