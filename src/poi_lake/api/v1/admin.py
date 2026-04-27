@@ -50,6 +50,33 @@ class AdminUnitOut(BaseModel):
     bbox: list[float]
 
 
+class RegionOut(BaseModel):
+    code: str
+    name: str
+    short_name: str
+    province_codes: list[str]
+    province_count: int
+
+
+@router.get("/regions", response_model=list[RegionOut])
+async def list_regions() -> list[RegionOut]:
+    """Six economic-administrative regions of Vietnam, each expanding into
+    a list of province codes. Used by the Ingestion Jobs UI as a one-click
+    shortcut over multiselecting every province in a region."""
+    from poi_lake.seeds.vn_regions import REGIONS
+
+    return [
+        RegionOut(
+            code=r["code"],
+            name=r["name"],
+            short_name=r["short_name"],
+            province_codes=r["province_codes"],
+            province_count=len(r["province_codes"]),
+        )
+        for r in REGIONS
+    ]
+
+
 @router.get("/admin-units", response_model=list[AdminUnitOut])
 async def list_admin_units(
     level: int | None = Query(default=None, ge=1, le=3),
@@ -177,7 +204,11 @@ class TiledJobRequest(BaseModel):
     # are computed per region and cells emitted for each, so jobs cover
     # only the actual admin areas (no wasted cells between separated regions).
     admin_code: str | None = Field(default=None, max_length=20)
-    admin_codes: list[str] = Field(default_factory=list, max_length=70)
+    admin_codes: list[str] = Field(default_factory=list, max_length=700)
+    # ``region_codes`` (R1..R6) is a sugar over admin_codes — the endpoint
+    # expands each region into its constituent province codes and merges
+    # with whatever's already in admin_codes. See poi_lake.seeds.vn_regions.
+    region_codes: list[str] = Field(default_factory=list, max_length=10)
     cell_size_m: int = Field(default=5000, ge=200, le=20000)
     category: str | None = None
     categories: list[str] = Field(default_factory=list, max_length=20)
@@ -198,9 +229,18 @@ class TiledJobRequest(BaseModel):
         return srcs
 
     def effective_admin_codes(self) -> list[str]:
+        from poi_lake.seeds.vn_regions import expand_region_codes
+
         codes = list(self.admin_codes)
         if self.admin_code and self.admin_code not in codes:
             codes.insert(0, self.admin_code)
+        # Append regions' provinces, preserving order, dedup.
+        if self.region_codes:
+            seen = set(codes)
+            for pc in expand_region_codes(self.region_codes):
+                if pc not in seen:
+                    codes.append(pc)
+                    seen.add(pc)
         return codes
 
 

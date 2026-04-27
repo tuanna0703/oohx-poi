@@ -63,6 +63,22 @@ def _provinces() -> pd.DataFrame:
         return pd.read_sql(sql, s.connection())
 
 
+@st.cache_data(ttl=600)
+def _regions() -> list[dict]:
+    """6 economic-administrative regions of VN — fetched from API so the
+    UI stays in sync with backend expansion logic."""
+    from poi_lake.seeds.vn_regions import REGIONS
+    return [
+        {
+            "code": r["code"],
+            "name": r["name"],
+            "province_count": len(r["province_codes"]),
+            "province_codes": list(r["province_codes"]),
+        }
+        for r in REGIONS
+    ]
+
+
 @st.cache_data(ttl=300)
 def _districts(province_code: str) -> pd.DataFrame:
     sql = text(
@@ -148,14 +164,42 @@ with st.expander("Trigger a new job", expanded=True):
 
     else:  # Tiled · admin unit
         provs = _provinces()
+        regions = _regions()
+
+        # Region multiselect — picking a region auto-includes every province
+        # in it. Combined with the manual Provinces picker below: the final
+        # province set is the union of (regions expanded) + (manual picks).
+        region_labels = st.multiselect(
+            "Regions (sweep all provinces in the picked vùng)",
+            options=[
+                f"{r['code']} — {r['name']} ({r['province_count']} tỉnh)"
+                for r in regions
+            ],
+            help="6 vùng kinh tế của VN. E.g. picking 'R2 — Đồng bằng "
+                 "sông Hồng' expands to Hà Nội + 10 tỉnh khác.",
+        )
+        picked_region_codes = [lbl.split(" — ", 1)[0] for lbl in region_labels]
+        regions_by_code = {r["code"]: r for r in regions}
+        provinces_from_regions: set[str] = set()
+        for rc in picked_region_codes:
+            for pc in regions_by_code[rc]["province_codes"]:
+                provinces_from_regions.add(pc)
+
         c1, c2, c3 = st.columns([2, 2, 1])
         prov_labels = c1.multiselect(
-            "Provinces",
+            "Provinces (additional, on top of regions)",
             options=[f"{r.code} — {r['name']}" for _, r in provs.iterrows()],
-            help="Pick one or more provinces. Districts dropdown will show "
-                 "the union of districts across all picked provinces.",
+            help="Pick extra provinces individually. Combined with regions "
+                 "above (union, deduped).",
         )
         prov_codes = [lbl.split(" — ", 1)[0] for lbl in prov_labels]
+        # Merge with provinces from regions, preserving order.
+        all_prov_codes: list[str] = list(prov_codes)
+        for pc in provinces_from_regions:
+            if pc not in all_prov_codes:
+                all_prov_codes.append(pc)
+        # Override prov_codes so the rest of the page sees the full set.
+        prov_codes = all_prov_codes
 
         # Build the district options across all picked provinces.
         dist_options: list[str] = []
@@ -278,10 +322,11 @@ with st.expander("Trigger a new job", expanded=True):
                 cat_n = max(1, len(chosen_categories))
                 src_n = len(chosen_sources)
                 estimated_total = total_cells * cat_n * src_n
-                regions_note = (
-                    f"{len(chosen_admin_codes)} regions" if mode == "Tiled · admin unit"
-                    else "1 bbox"
-                )
+                if mode == "Tiled · admin unit":
+                    label = "districts" if dist_codes else "provinces"
+                    regions_note = f"{len(chosen_admin_codes)} {label}"
+                else:
+                    regions_note = "1 bbox"
                 st.caption(
                     f"≈ **{total_cells} cells ({regions_note}) × {cat_n} categories × "
                     f"{src_n} sources = {estimated_total} jobs** "
