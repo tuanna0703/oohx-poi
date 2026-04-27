@@ -47,6 +47,7 @@ def _configure_broker() -> RedisBroker:
 broker = _configure_broker()
 
 # Importing the actor modules registers actors against the broker.
+from poi_lake.workers import crawl_planner  # noqa: E402, F401
 from poi_lake.workers import dedupe  # noqa: E402, F401
 from poi_lake.workers import ingest  # noqa: E402, F401  (side-effect import)
 from poi_lake.workers import normalize  # noqa: E402, F401
@@ -94,9 +95,47 @@ def _start_dedupe_scheduler() -> None:
     logger.info("dedupe scheduler armed: every %d minute(s)", interval_min)
 
 
-# Only the worker process should run the scheduler — the API container
-# also imports this module (admin endpoint references run_ingestion_job),
-# and we don't want the API duplicating the schedule.
+def _start_crawl_planner_scheduler() -> None:
+    """Tick ``run_crawl_planner.send()`` every ``CRAWL_PLANNER_MINUTES``.
+
+    Same Redis-SETNX coordination as the dedupe scheduler — only one of
+    the worker processes wins the window so we don't multiply tick rate
+    when ``--processes`` is bumped.
+    """
+    settings = get_settings()
+    interval_min = settings.crawl_planner_minutes
+    if interval_min <= 0:
+        logger.info("crawl planner scheduler disabled (CRAWL_PLANNER_MINUTES=0)")
+        return
+
+    interval_s = interval_min * 60
+
+    def _tick() -> None:
+        try:
+            import redis as _redis
+            r = _redis.from_url(settings.redis_url)
+            window = int(time.time() // interval_s)
+            key = f"poi-lake:scheduler:crawl_planner:{window}"
+            if r.set(key, "1", ex=interval_s + 10, nx=True):
+                from poi_lake.workers.crawl_planner import run_crawl_planner
+                run_crawl_planner.send()
+                logger.info("scheduled crawl-planner tick enqueued (window=%d)", window)
+        except Exception:  # noqa: BLE001
+            logger.exception("crawl planner scheduler tick failed")
+        finally:
+            t = threading.Timer(interval_s, _tick)
+            t.daemon = True
+            t.start()
+
+    t = threading.Timer(interval_s, _tick)
+    t.daemon = True
+    t.start()
+    logger.info("crawl planner scheduler armed: every %d minute(s)", interval_min)
+
+
+# Only the worker process should run schedulers — the API container also
+# imports this module (admin endpoints reference run_ingestion_job).
 _invoked_as = sys.argv[0] if sys.argv else ""
 if "dramatiq" in _invoked_as:
     _start_dedupe_scheduler()
+    _start_crawl_planner_scheduler()

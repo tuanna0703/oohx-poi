@@ -187,10 +187,13 @@ class IngestionService:
         await self.session.commit()
 
     async def _mark_completed(self, job: IngestionJob, stats: dict[str, int]) -> None:
+        # Surface raw count so the crawl velocity endpoint can sum it.
+        stats = {**stats, "raw_count": stats.get("new", 0)}
         job.status = IngestionJobStatus.COMPLETED.value
         job.completed_at = datetime.now(timezone.utc)
         job.stats = stats
         await self.session.commit()
+        await self._update_crawl_plan(job, success=True, raw_count=stats["raw_count"])
 
     async def _fail(
         self, job: IngestionJob, reason: str, stats: dict[str, int] | None = None
@@ -208,3 +211,89 @@ class IngestionService:
         fresh.error_message = reason[:2000]
         fresh.stats = stats or {}
         await self.session.commit()
+        await self._update_crawl_plan(fresh, success=False, raw_count=0,
+                                      error=reason[:500])
+
+    async def _update_crawl_plan(
+        self,
+        job: IngestionJob,
+        *,
+        success: bool,
+        raw_count: int,
+        error: str | None = None,
+    ) -> None:
+        """Tick the parent crawl_plan row, if any.
+
+        Idempotent + concurrency-safe via a single SQL UPDATE that:
+          * increments cells_done OR cells_failed
+          * sums raw_count into pois_raw
+          * flips status='done' once cells_done + cells_failed >= cells_total
+            and the row is still in_progress
+        """
+        params = job.params or {}
+        plan_id = params.get("crawl_plan_id")
+        if not plan_id:
+            return
+        try:
+            plan_id = int(plan_id)
+        except (TypeError, ValueError):
+            return
+
+        if success:
+            stmt = text(
+                """
+                UPDATE crawl_plan
+                SET cells_done = cells_done + 1,
+                    pois_raw   = pois_raw + :raw,
+                    status     = CASE
+                        WHEN status = 'in_progress'
+                         AND cells_total IS NOT NULL
+                         AND cells_done + 1 + cells_failed >= cells_total
+                        THEN 'done'
+                        ELSE status
+                    END,
+                    completed_at = CASE
+                        WHEN status = 'in_progress'
+                         AND cells_total IS NOT NULL
+                         AND cells_done + 1 + cells_failed >= cells_total
+                        THEN NOW()
+                        ELSE completed_at
+                    END
+                WHERE id = :pid
+                """
+            )
+            params_sql = {"raw": int(raw_count), "pid": plan_id}
+        else:
+            stmt = text(
+                """
+                UPDATE crawl_plan
+                SET cells_failed = cells_failed + 1,
+                    error_summary = COALESCE(:err, error_summary),
+                    status = CASE
+                        WHEN status = 'in_progress'
+                         AND cells_total IS NOT NULL
+                         AND cells_done + cells_failed + 1 >= cells_total
+                        THEN
+                            CASE
+                              WHEN cells_done = 0 THEN 'failed'
+                              ELSE 'done'      -- partial success counts as done
+                            END
+                        ELSE status
+                    END,
+                    completed_at = CASE
+                        WHEN status = 'in_progress'
+                         AND cells_total IS NOT NULL
+                         AND cells_done + cells_failed + 1 >= cells_total
+                        THEN NOW()
+                        ELSE completed_at
+                    END
+                WHERE id = :pid
+                """
+            )
+            params_sql = {"err": error, "pid": plan_id}
+        try:
+            await self.session.execute(stmt, params_sql)
+            await self.session.commit()
+        except SQLAlchemyError as exc:
+            logger.warning("crawl_plan update failed for plan %d: %s", plan_id, exc)
+            await self.session.rollback()

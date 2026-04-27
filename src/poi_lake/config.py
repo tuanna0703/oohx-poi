@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     )
     foody_rate_limit_per_sec: float = Field(default=2.0, alias="FOODY_RATE_LIMIT_PER_SEC")
 
+    # ---- Crawl planner ----
+    crawl_rate_per_hour: int = Field(default=200, alias="CRAWL_RATE_PER_HOUR")
+    crawl_planner_minutes: int = Field(default=10, alias="CRAWL_PLANNER_MINUTES")
+    crawl_batch_size: int = Field(default=50, alias="CRAWL_BATCH_SIZE")
+    crawl_cell_size_m: int = Field(default=5000, alias="CRAWL_CELL_SIZE_M")
+    crawl_priority_provinces: str = Field(
+        default="01,79,48,31,92,22,75,74,68",
+        alias="CRAWL_PRIORITY_PROVINCES",
+    )
+    crawl_recrawl_days: int = Field(default=30, alias="CRAWL_RECRAWL_DAYS")
+
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")
     dedupe_auto_merge_threshold: float = Field(
