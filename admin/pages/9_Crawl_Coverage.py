@@ -211,9 +211,24 @@ else:
     pivot["__avg"] = pivot.mean(axis=1)
     pivot = pivot.sort_values("__avg", ascending=False).drop(columns="__avg")
 
+    def _heatmap_color(v: float) -> str:
+        """Red (0%) → yellow (50%) → green (100%) without matplotlib.
+
+        Linear interpolation through HSL hue 0° → 60° → 120°. Light
+        background so dark text stays readable.
+        """
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return ""
+        v = max(0.0, min(100.0, v))
+        # 0% = hue 0 (red), 100% = hue 120 (green)
+        hue = int(v * 1.2)
+        # Pastel: 70% lightness, 65% saturation
+        return f"background-color: hsl({hue}, 65%, 70%); color: #222"
+
     st.dataframe(
-        pivot.style.background_gradient(cmap="RdYlGn", axis=None, vmin=0, vmax=100)
-                    .format("{:.0f}%"),
+        pivot.style.map(_heatmap_color).format("{:.0f}%"),
         use_container_width=True,
         height=600,
     )
