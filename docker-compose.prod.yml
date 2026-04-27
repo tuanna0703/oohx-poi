@@ -14,9 +14,14 @@ name: poi-lake
 
 services:
   postgres:
+    # Single-host deploy — no docker-secrets infra, just take the password
+    # from .env via compose interpolation. The ``:?`` form makes compose
+    # fail loudly if POSTGRES_PASSWORD isn't set rather than silently
+    # initialising the DB with a blank password.
     environment:
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      POSTGRES_PASSWORD:               # fallback to env from .env if no secret
+      POSTGRES_DB: ${POSTGRES_DB:-poi_lake}
+      POSTGRES_USER: ${POSTGRES_USER:-poi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     # Internal-only — no point exposing 5432 publicly. Containers reach
     # postgres via the docker network as ``postgres:5432``.
     ports: !reset []
@@ -42,6 +47,9 @@ services:
       APP_ENV: production
       APP_LOG_LEVEL: INFO
       DATABASE_POOL_SIZE: "30"
+      # Override the dev compose's hardcoded ``poi:poi`` URL with the real
+      # password from .env. Same shape, just interpolated.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-poi}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-poi_lake}
     volumes: !reset []                  # drop the dev source mounts
     ports:
       - "8000:8000"
@@ -55,6 +63,7 @@ services:
     environment:
       APP_ENV: production
       APP_LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-poi}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-poi_lake}
       # dramatiq.middleware.prometheus exposes its own /metrics on this port
       # inside the container — published to the host so Prometheus can scrape.
       dramatiq_prom_host: 0.0.0.0
@@ -75,6 +84,7 @@ services:
   admin:
     environment:
       APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-poi}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-poi_lake}
     volumes: !reset []
     deploy:
       resources:
