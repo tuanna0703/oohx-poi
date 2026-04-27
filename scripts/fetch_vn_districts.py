@@ -39,43 +39,54 @@ SKIP_PROVINCES = {"01", "79", "48"}  # Hà Nội, HCMC, Đà Nẵng
 logger = logging.getLogger("fetch_vn_districts")
 
 
-def _overpass_query(province_name: str) -> str:
-    """Find admin_level=6 relations inside the named province (admin_level=4)."""
-    return f"""
+def _stream_districts(
+    province_name: str, bbox: list[float], max_retries: int = 3
+) -> list[dict[str, Any]]:
+    """Hit Overpass once per province. Returns list of district dicts with
+    ``name``, ``bounds``, and any ``ref`` tag if OSM has one.
+
+    Bbox-based query — area-based ("name=Hà Giang") was unreliable (Overpass
+    sometimes returned empty even for valid names), and bbox lookup is what
+    we actually want anyway. Trade-off: catches a few neighbouring province
+    districts whose bbox overlaps; we filter those out by checking that the
+    district's centroid falls within the province bbox.
+    """
+    lng_min, lat_min, lng_max, lat_max = bbox
+    query = f"""
 [out:json][timeout:90];
-relation["admin_level"="4"]["name"="{province_name}"]->.prov;
 (
-  relation["admin_level"="6"](area.prov);
-  relation["admin_level"="6"]["boundary"="administrative"](area.prov);
+  relation["admin_level"="6"]["boundary"="administrative"]
+    ({lat_min},{lng_min},{lat_max},{lng_max});
 );
 out tags bb;
 """.strip()
 
-
-def _stream_districts(province_name: str) -> list[dict[str, Any]]:
-    """Hit Overpass once per province. Returns list of district dicts with
-    ``name``, ``bounds``, and any GSO ``ref`` tag if OSM has one."""
-    # Overpass needs an Area, so first promote the named relation to area.
-    query = f"""
-[out:json][timeout:120];
-rel["admin_level"="4"]["name"="{province_name}"];
-map_to_area;
-(
-  relation["admin_level"="6"](area)["boundary"="administrative"];
-);
-out tags bb;
-"""
-    try:
-        resp = httpx.post(
-            OVERPASS_URL,
-            data={"data": query.strip()},
-            timeout=180,
-            headers={"User-Agent": "poi-lake/0.1 (admin-units seeder)"},
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.warning("overpass error for %s: %s", province_name, exc)
+    for attempt in range(max_retries):
+        try:
+            resp = httpx.post(
+                OVERPASS_URL,
+                data={"data": query},
+                timeout=180,
+                headers={"User-Agent": "poi-lake/0.1 (admin-units seeder)"},
+            )
+            if resp.status_code in (429, 504, 503):
+                # Overpass throttling — back off exponentially.
+                wait = 5 * (2 ** attempt)
+                logger.warning(
+                    "  overpass %s for %s; retry in %ds (attempt %d/%d)",
+                    resp.status_code, province_name, wait, attempt + 1, max_retries,
+                )
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        except httpx.HTTPError as exc:
+            logger.warning("  overpass error for %s: %s", province_name, exc)
+            return []
+    else:
+        logger.warning("  giving up on %s after %d retries", province_name, max_retries)
         return []
+
     elements = resp.json().get("elements", [])
     out: list[dict[str, Any]] = []
     for el in elements:
@@ -83,6 +94,12 @@ out tags bb;
         bounds = el.get("bounds")
         name = tags.get("name") or tags.get("name:vi")
         if not name or not bounds:
+            continue
+        # Filter out neighbouring-province districts whose bbox overlaps —
+        # require the district's centroid to fall within the province bbox.
+        c_lat = (bounds["minlat"] + bounds["maxlat"]) / 2
+        c_lng = (bounds["minlon"] + bounds["maxlon"]) / 2
+        if not (lat_min <= c_lat <= lat_max and lng_min <= c_lng <= lng_max):
             continue
         out.append({
             "name": name,
@@ -95,17 +112,20 @@ out tags bb;
     return out
 
 
-async def _existing_provinces() -> list[tuple[str, str]]:
+async def _existing_provinces() -> list[tuple[str, str, list[float]]]:
     async with session_scope() as session:
         rows = (
             await session.execute(
                 text(
-                    "SELECT code, name FROM admin_units "
-                    "WHERE level = 1 ORDER BY code"
+                    "SELECT code, name, lng_min, lat_min, lng_max, lat_max "
+                    "FROM admin_units WHERE level = 1 ORDER BY code"
                 )
             )
         ).all()
-    return [(r[0], r[1]) for r in rows]
+    return [
+        (r[0], r[1], [float(r[2]), float(r[3]), float(r[4]), float(r[5])])
+        for r in rows
+    ]
 
 
 async def _existing_district_codes(parent: str) -> set[str]:
@@ -178,7 +198,7 @@ async def main() -> int:
     logger.info("found %d provinces in admin_units", len(provinces))
 
     total_inserted = 0
-    for code, name in provinces:
+    for code, name, bbox in provinces:
         if code in SKIP_PROVINCES:
             logger.info("skip %s (%s) — already seeded", code, name)
             continue
@@ -188,15 +208,15 @@ async def main() -> int:
             continue
 
         logger.info("fetching districts for %s (%s) …", code, name)
-        districts = _stream_districts(name)
+        districts = _stream_districts(name, bbox)
         if not districts:
             logger.warning("  no districts returned for %s", name)
         else:
             n = await _upsert_districts(code, districts)
-            logger.info("  upserted %d districts", n)
+            logger.info("  upserted %d districts (e.g. %s)", n, districts[0]["name"])
             total_inserted += n
         # Throttle so we don't hammer the public Overpass instance.
-        time.sleep(1.5)
+        time.sleep(2.0)
 
     logger.info("done — %d districts inserted/updated", total_inserted)
     return 0
