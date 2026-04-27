@@ -107,12 +107,22 @@ with st.expander("Trigger a new job", expanded=True):
         st.stop()
 
     c1, c2 = st.columns([2, 3])
-    source_code = c1.selectbox("Source", options=enabled["code"].tolist())
+    chosen_sources: list[str] = c1.multiselect(
+        "Sources",
+        options=enabled["code"].tolist(),
+        default=enabled["code"].tolist()[:1],
+        help="Pick one or more adapters. Each one runs against every "
+             "(cell × category) combo, so total jobs = cells × cats × sources. "
+             "Dedupe folds duplicate POIs back together afterwards.",
+    )
     mode = c2.radio(
         "Area",
         ["Single cell", "Tiled · admin unit", "Tiled · bbox"],
         horizontal=True,
     )
+    if not chosen_sources:
+        st.warning("Pick at least one source.")
+        st.stop()
 
     bbox: list[float] | None = None
     admin_code: str | None = None
@@ -228,9 +238,11 @@ with st.expander("Trigger a new job", expanded=True):
             chosen_categories = [txt]
 
     # ---- Live preview ----------------------------------------------------
-    if chosen_categories and source_code == "gosom_scraper":
+    # Keyword preview only meaningful for gosom — gate on whether it's
+    # among the picked sources.
+    if chosen_categories and "gosom_scraper" in chosen_sources:
         for c in chosen_categories[:8]:
-            st.info(_format_keyword_preview(source_code, c))
+            st.info(_format_keyword_preview("gosom_scraper", c))
 
     # Estimated job count + max_jobs cap (only relevant for tiled modes).
     estimated_total: int | None = None
@@ -243,10 +255,12 @@ with st.expander("Trigger a new job", expanded=True):
             if preview_bbox:
                 cells = _grid_centers(preview_bbox, int(cell_size_m))
                 cat_n = max(1, len(chosen_categories))
-                estimated_total = len(cells) * cat_n
+                src_n = len(chosen_sources)
+                estimated_total = len(cells) * cat_n * src_n
                 st.caption(
-                    f"≈ **{len(cells)} cells × {cat_n} categories = "
-                    f"{estimated_total} jobs** (cell radius ~{int(cell_size_m)//2}m)"
+                    f"≈ **{len(cells)} cells × {cat_n} categories × "
+                    f"{src_n} sources = {estimated_total} jobs** "
+                    f"(cell radius ~{int(cell_size_m)//2}m)"
                 )
         except Exception:  # noqa: BLE001
             pass
@@ -258,34 +272,45 @@ with st.expander("Trigger a new job", expanded=True):
         max_value=2000,
         value=min(2000, cap_default),
         step=50,
-        help="Backend rejects the request if cells × categories exceeds this. "
-             "Bump it for province-wide sweeps; keep it low while testing.",
+        help="Backend rejects the request if cells × categories × sources "
+             "exceeds this. Bump it for province-wide sweeps across multiple "
+             "adapters; keep it low while testing.",
     )
     if estimated_total and estimated_total > max_jobs:
         st.warning(
             f"Estimated {estimated_total} jobs > cap {max_jobs} — "
-            f"raise the cap, pick a larger cell_size_m, or fewer categories."
+            f"raise the cap, pick a larger cell_size_m, fewer categories, "
+            f"or fewer sources."
         )
 
     # ---- Submit ----------------------------------------------------------
     if st.button("Submit", type="primary"):
         try:
             if mode == "Single cell":
+                # Single cell endpoint takes one source per call — loop for
+                # the multi-source case so each adapter gets its own job.
                 params: dict = {"lat": lat, "lng": lng, "radius_m": int(radius)}
                 if chosen_categories:
                     params["category"] = chosen_categories[0]
-                resp = post_json(
-                    "/api/v1/admin/ingestion-jobs",
-                    body={
-                        "source_code": source_code,
-                        "job_type": "area_sweep",
-                        "params": params,
-                    },
+                created_ids = []
+                for sc in chosen_sources:
+                    resp = post_json(
+                        "/api/v1/admin/ingestion-jobs",
+                        body={
+                            "source_code": sc,
+                            "job_type": "area_sweep",
+                            "params": params,
+                        },
+                    )
+                    created_ids.append(resp["id"])
+                st.success(
+                    f"{len(created_ids)} job(s) enqueued · "
+                    f"sources {', '.join(chosen_sources)} · "
+                    f"ids {created_ids}"
                 )
-                st.success(f"Job {resp['id']} enqueued")
             else:
                 body: dict = {
-                    "source_code": source_code,
+                    "source_codes": chosen_sources,
                     "cell_size_m": int(cell_size_m),
                     "categories": chosen_categories,
                     "max_jobs": int(max_jobs),
@@ -297,7 +322,8 @@ with st.expander("Trigger a new job", expanded=True):
                 resp = post_json("/api/v1/admin/ingestion-jobs/tiled", body=body)
                 st.success(
                     f"{resp['count']} jobs enqueued · "
-                    f"{resp['cells']} cells × {resp['categories']} categories · "
+                    f"{resp['cells']} cells × {resp['categories']} cats × "
+                    f"{resp.get('sources', 1)} sources · "
                     f"radius {resp['cell_radius_m']}m"
                 )
             st.cache_data.clear()

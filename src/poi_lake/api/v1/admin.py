@@ -156,13 +156,17 @@ class TiledJobRequest(BaseModel):
     via the ``admin_units`` table — pass a province code (e.g. ``"01"`` for
     Hà Nội) or a district code (e.g. ``"01.005"`` for Cầu Giấy).
 
-    ``categories`` is a list — one set of jobs per category. Pairs well
-    with the OpenOOH-code translation in GosomScraperAdapter:
-    ``{"categories": ["education.schools", "education.colleges_universities"]}``
-    runs both keyword sets across every cell.
+    ``categories`` is a list — one set of jobs per category. ``source_codes``
+    is also a list — multiple adapters fan out across every cell. Total
+    job count = cells × categories × sources, bounded by ``max_jobs``.
+    Picking gosom + osm + foody for one province gives parallel coverage
+    across all three sources, which dedupe folds afterwards.
     """
 
-    source_code: str = Field(min_length=1)
+    # Single-source backward-compat — older callers can keep posting
+    # ``source_code``; new callers should use ``source_codes``.
+    source_code: str | None = Field(default=None, min_length=1)
+    source_codes: list[str] = Field(default_factory=list, max_length=10)
     bbox: list[float] | None = Field(
         default=None,
         min_length=4, max_length=4,
@@ -179,6 +183,14 @@ class TiledJobRequest(BaseModel):
         if self.category and self.category not in cats:
             cats.insert(0, self.category)
         return cats or [None]
+
+    def effective_sources(self) -> list[str]:
+        srcs = list(self.source_codes)
+        if self.source_code and self.source_code not in srcs:
+            srcs.insert(0, self.source_code)
+        if not srcs:
+            raise ValueError("at least one of source_code / source_codes is required")
+        return srcs
 
 
 def _grid_centers(
@@ -224,19 +236,30 @@ async def create_tiled_ingestion_jobs(
     payload: TiledJobRequest,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    """Submit one ``area_sweep`` job per grid cell over ``bbox``.
+    """Submit one ``area_sweep`` job per (cell × category × source) combo.
 
     Cell radius is half the cell side, which gives a small overlap between
     neighbouring cells — that's what we want for dedupe to fold near-edge
     duplicates instead of leaving them as parallel masters.
     """
-    src = (
-        await session.execute(select(Source).where(Source.code == payload.source_code))
-    ).scalar_one_or_none()
-    if src is None:
-        raise HTTPException(404, f"source {payload.source_code!r} not found")
-    if not src.enabled:
-        raise HTTPException(409, f"source {payload.source_code!r} is disabled")
+    try:
+        source_codes = payload.effective_sources()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    # Resolve every source up front — fail loudly if any is unknown / disabled.
+    src_rows = (
+        await session.execute(
+            select(Source).where(Source.code.in_(source_codes))
+        )
+    ).scalars().all()
+    found = {s.code: s for s in src_rows}
+    missing = [c for c in source_codes if c not in found]
+    if missing:
+        raise HTTPException(404, f"sources not found: {missing}")
+    disabled = [c for c, s in found.items() if not s.enabled]
+    if disabled:
+        raise HTTPException(409, f"sources disabled: {disabled}")
 
     # Resolve bbox: explicit > admin_code lookup.
     bbox: list[float] | None = payload.bbox
@@ -254,34 +277,37 @@ async def create_tiled_ingestion_jobs(
         raise HTTPException(400, "bbox produced zero cells — check coordinate order")
 
     categories = payload.effective_categories()
-    total_jobs = len(centers) * len(categories)
+    total_jobs = len(centers) * len(categories) * len(source_codes)
     if total_jobs > payload.max_jobs:
         raise HTTPException(
             400,
-            f"would create {total_jobs} jobs ({len(centers)} cells × {len(categories)} "
-            f"categories); cap max_jobs={payload.max_jobs}. Raise the cap or use a "
-            f"larger cell_size_m / fewer categories.",
+            f"would create {total_jobs} jobs ({len(centers)} cells × "
+            f"{len(categories)} categories × {len(source_codes)} sources); "
+            f"cap max_jobs={payload.max_jobs}. Raise the cap or use a larger "
+            f"cell_size_m / fewer categories / fewer sources.",
         )
 
     radius = payload.cell_size_m // 2
     from poi_lake.workers.ingest import run_ingestion_job
 
     job_ids: list[int] = []
-    for cat in categories:
-        for lat, lng in centers:
-            params: dict[str, object] = {"lat": lat, "lng": lng, "radius_m": radius}
-            if cat:
-                params["category"] = cat
-            job = IngestionJob(
-                source_id=src.id,
-                job_type="area_sweep",
-                params=params,
-                status=IngestionJobStatus.PENDING.value,
-                stats={},
-            )
-            session.add(job)
-            await session.flush()
-            job_ids.append(job.id)
+    for src_code in source_codes:
+        src = found[src_code]
+        for cat in categories:
+            for lat, lng in centers:
+                params: dict[str, object] = {"lat": lat, "lng": lng, "radius_m": radius}
+                if cat:
+                    params["category"] = cat
+                job = IngestionJob(
+                    source_id=src.id,
+                    job_type="area_sweep",
+                    params=params,
+                    status=IngestionJobStatus.PENDING.value,
+                    stats={},
+                )
+                session.add(job)
+                await session.flush()
+                job_ids.append(job.id)
     await session.commit()
 
     # Dispatch after commit so workers see the rows.
@@ -289,14 +315,16 @@ async def create_tiled_ingestion_jobs(
         run_ingestion_job.send(jid)
 
     logger.info(
-        "tiled-ingest: %d jobs queued source=%s cells=%d categories=%d radius=%dm",
-        len(job_ids), payload.source_code, len(centers), len(categories), radius,
+        "tiled-ingest: %d jobs queued sources=%s cells=%d categories=%d radius=%dm",
+        len(job_ids), source_codes, len(centers), len(categories), radius,
     )
     return {
         "job_ids": job_ids,
         "count": len(job_ids),
         "cells": len(centers),
         "categories": len(categories),
+        "sources": len(source_codes),
+        "source_codes": source_codes,
         "cell_radius_m": radius,
         "bbox": bbox,
     }
