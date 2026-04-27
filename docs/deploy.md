@@ -41,7 +41,7 @@ Hostnames are arbitrary — set whatever you used to `CADDY_API_HOST` /
 ssh root@<vps>
 
 # 1. Bootstrap (installs docker, ufw, swap, backup cron, dedicated user).
-curl -fsSL https://raw.githubusercontent.com/oohx-matrix/oohx-poi/main/scripts/bootstrap_vps.sh \
+curl -fsSL https://raw.githubusercontent.com/tuanna0703/oohx-poi/main/scripts/bootstrap_vps.sh \
   | sudo bash
 
 # 2. Switch to the service user and configure secrets.

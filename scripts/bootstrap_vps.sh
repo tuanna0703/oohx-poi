@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/oohx-matrix/oohx-poi.git}"
+REPO_URL="${REPO_URL:-https://github.com/tuanna0703/oohx-poi.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/poi-lake}"
 SERVICE_USER="${SERVICE_USER:-poi}"
 
