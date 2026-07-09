@@ -39,6 +39,23 @@ def test_rejects_non_adapter() -> None:
         load_adapter_class("poi_lake.adapters.base:RawPOIRecord")
 
 
+def test_unimplemented_adapter_says_so() -> None:
+    with pytest.raises(ImportError, match="not implemented yet"):
+        load_adapter_class("poi_lake.adapters.vietmap:VietmapAdapter")
+
+
+def test_missing_third_party_import_is_not_relabelled(monkeypatch) -> None:
+    """An adapter that exists but imports a missing package keeps its own error."""
+    import importlib
+
+    def fake_import(name: str):
+        raise ModuleNotFoundError("No module named 'some_dep'", name="some_dep")
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    with pytest.raises(ModuleNotFoundError, match="some_dep"):
+        load_adapter_class("poi_lake.adapters.google_places:GooglePlacesAdapter")
+
+
 def test_google_adapter_requires_api_key() -> None:
     from poi_lake.adapters.base import AdapterError
 

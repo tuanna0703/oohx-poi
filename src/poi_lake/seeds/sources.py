@@ -55,6 +55,11 @@ SOURCES: list[dict[str, Any]] = [
         "enabled": False,
         "priority": 30,
     },
+    # ── NOT IMPLEMENTED ───────────────────────────────────────────────────
+    # The two sources below are seeded as placeholders: their config is
+    # sketched, but poi_lake/adapters/{vietmap,foody}.py do not exist yet.
+    # Enabling either one fails at ingestion time with an explicit ImportError
+    # from adapters/registry.py. Write the adapter before flipping `enabled`.
     {
         "code": "vietmap",
         "name": "Vietmap Maps API",

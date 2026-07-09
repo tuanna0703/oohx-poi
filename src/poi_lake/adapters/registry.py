@@ -25,7 +25,17 @@ def load_adapter_class(adapter_class: str) -> type[SourceAdapter]:
             f"adapter_class must be 'module.path:ClassName', got {adapter_class!r}"
         )
     module_path, class_name = adapter_class.split(":", 1)
-    module = importlib.import_module(module_path)
+    try:
+        module = importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        # A source row can name an adapter we have not written yet (see
+        # seeds/sources.py). Say so, instead of leaking a bare import error.
+        if exc.name == module_path:
+            raise ImportError(
+                f"adapter module {module_path!r} does not exist — the adapter for "
+                f"this source is not implemented yet; leave the source disabled"
+            ) from exc
+        raise
     cls = getattr(module, class_name, None)
     if cls is None:
         raise ImportError(f"{class_name!r} not found in {module_path!r}")
