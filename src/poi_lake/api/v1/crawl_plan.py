@@ -162,6 +162,7 @@ async def initialize(
                             cells_total = NULL,
                             cells_done = 0,
                             cells_failed = 0,
+                            cells_enqueued = 0,
                             attempts = 0,
                             last_attempt_at = NULL,
                             completed_at = NULL,
@@ -406,11 +407,19 @@ async def failed_rows(
 
 @router.post("/pause", status_code=status.HTTP_200_OK)
 async def pause(session: AsyncSession = Depends(get_session)) -> dict[str, int]:
-    """Pause all pending rows. In-progress rows finish naturally."""
+    """Pause every row that still has cells to dispatch.
+
+    Covers ``in_progress`` too: a row keeps dispatching a budget-sized slice
+    per tick until its grid is exhausted, so pausing only ``pending`` would
+    leave the crawl running. Cells already enqueued still run to completion —
+    ``cells_enqueued`` is preserved, so ``/resume`` picks up mid-grid.
+    """
     result = await session.execute(
         text(
             "UPDATE crawl_plan SET status = 'paused' "
-            "WHERE status = 'pending' RETURNING id"
+            "WHERE status IN ('pending', 'in_progress') "
+            "  AND (cells_total IS NULL OR cells_enqueued < cells_total) "
+            "RETURNING id"
         )
     )
     n = len(result.all())
@@ -444,6 +453,7 @@ async def retry_failed(session: AsyncSession = Depends(get_session)) -> dict[str
                 error_summary = NULL,
                 cells_done = 0,
                 cells_failed = 0,
+                cells_enqueued = 0,
                 cells_total = NULL,
                 last_attempt_at = NULL
             WHERE status = 'failed' RETURNING id

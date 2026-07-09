@@ -50,6 +50,10 @@ class CrawlPlan(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     cells_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Cells dispatched so far — the planner's resume cursor. Distinct from
+    # cells_done, which only counts jobs that have finished; slicing on
+    # cells_done would re-dispatch cells whose jobs are still in flight.
+    cells_enqueued: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cells_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cells_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     pois_raw: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

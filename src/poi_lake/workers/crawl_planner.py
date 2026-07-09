@@ -3,17 +3,24 @@
 Periodic actor that drains the ``crawl_plan`` queue at a gosom-friendly
 rate. On each tick:
 
-1. Compute current load: how many ingest jobs are pending+running.
-2. If load >= ``CRAWL_BATCH_SIZE`` → bail (workers are already saturated).
-3. Otherwise pull the next ``budget`` rows by (priority, last_attempt_at)
-   and convert each into ingest jobs (cells × keywords).
-4. Mark plan rows ``in_progress`` with the cell count so the on-completion
-   hook can track progress.
+1. Finalize rows whose cells have all landed; recompute pois_master.
+2. Compute current load: how many ingest jobs are pending+running.
+3. If load >= ``budget * 2`` → bail (workers are already saturated).
+4. Otherwise pull rows by (priority, last_attempt_at) that still have cells
+   left to dispatch, and turn the next slice into ingest jobs.
+5. Advance ``cells_enqueued`` by the slice size and mark the row
+   ``in_progress``; the on-completion hook tracks ``cells_done``.
 
 Throttling shape: tick every ``CRAWL_PLANNER_MINUTES`` minutes; per tick
 budget = ``CRAWL_RATE_PER_HOUR / (60 / CRAWL_PLANNER_MINUTES)``. Default
-200/hour and 10-minute tick → 33 jobs per tick. Each plan row spawns
-``cells_total`` jobs, so 1-2 plan rows actually fit per tick at full rate.
+200/hour and 10-minute tick → 33 jobs per tick.
+
+A plan row usually holds far more cells than one tick's budget (production
+averages 563), so a row is dispatched a slice at a time across many ticks.
+``cells_enqueued`` is the resume cursor; it must not be conflated with
+``cells_done``, which lags while jobs are still running. Before 2026-07 there
+was no cursor and the SELECT excluded ``in_progress`` rows, so every row got
+exactly one slice and was then abandoned — coverage froze at 5.9%.
 
 Triggered:
   * automatic — armed at worker startup via a Timer (see workers/__init__.py)
@@ -67,6 +74,7 @@ async def _tick() -> dict[str, Any]:
 
             # ---- maintenance: recompute pois_master + auto-pause check ----
             await _recompute_pois_master(session)
+            await _finalize_completed(session)
             paused_count = await _maybe_auto_pause(session)
             if paused_count:
                 logger.warning(
@@ -96,17 +104,26 @@ async def _tick() -> dict[str, Any]:
                 }
 
             # Pull the next plan rows by priority. NULLS FIRST puts never-
-            # attempted rows at the front; tied rows go by oldest attempt.
+            # attempted rows at the front; tied rows go by oldest attempt, so
+            # partially-dispatched rows round-robin instead of one row hogging
+            # every tick.
+            #
+            # in_progress rows stay eligible until every cell is dispatched —
+            # a tick only ever enqueues `budget` cells, so a row of 563 cells
+            # needs ~17 ticks. Excluding them (the pre-2026-07 behaviour) meant
+            # each row got exactly one slice and was then abandoned forever.
             rows = (
                 await session.execute(
                     text(
                         """
                         SELECT cp.id, cp.province_code, cp.openooh_code,
-                               cp.cell_size_m,
+                               cp.cell_size_m, cp.cells_enqueued, cp.cells_total,
                                p.lng_min, p.lat_min, p.lng_max, p.lat_max
                         FROM crawl_plan cp
                         JOIN admin_units p ON p.code = cp.province_code
-                        WHERE cp.status = 'pending'
+                        WHERE cp.status IN ('pending', 'in_progress')
+                          AND (cp.cells_total IS NULL
+                               OR cp.cells_enqueued < cp.cells_total)
                         ORDER BY cp.priority ASC,
                                  cp.last_attempt_at ASC NULLS FIRST
                         LIMIT 5
@@ -160,12 +177,17 @@ async def _tick() -> dict[str, Any]:
                     )
                     continue
 
-                # If this row would push us over budget, slice it. We still
-                # mark in_progress so it doesn't get re-picked; remaining
-                # cells will be filled in later ticks (planner re-emits the
-                # whole row only on retry-failed).
+                # Resume where the last tick stopped. cells_enqueued — not
+                # cells_done — is the cursor: a tick can fire while earlier
+                # jobs are still running, and slicing on cells_done would
+                # re-dispatch cells that are already in flight.
+                offset = int(r.cells_enqueued or 0)
+                if offset >= cells_total:
+                    # Grid shrank (cell_size_m was raised) — nothing left to
+                    # dispatch. Leave it to the completion sweep above.
+                    continue
                 allowance = max(0, budget - jobs_enqueued)
-                use_centers = centers[:allowance]
+                use_centers = centers[offset : offset + allowance]
                 radius = size // 2
 
                 # Enqueue ingest jobs, tagged with crawl_plan_id.
@@ -204,12 +226,13 @@ async def _tick() -> dict[str, Any]:
                         UPDATE crawl_plan SET
                           status = 'in_progress',
                           cells_total = :total,
+                          cells_enqueued = cells_enqueued + :n,
                           attempts = attempts + 1,
                           last_attempt_at = NOW()
                         WHERE id = :id
                         """
                     ),
-                    {"total": cells_total, "id": int(r.id)},
+                    {"total": cells_total, "n": len(job_ids), "id": int(r.id)},
                 )
                 picked += 1
                 # Dispatch after row update so worker doesn't race.
@@ -272,6 +295,39 @@ async def _recompute_pois_master(session) -> None:  # type: ignore[no-untyped-de
         await session.rollback()
 
 
+async def _finalize_completed(session) -> int:  # type: ignore[no-untyped-def]
+    """Flip fully-accounted rows to ``done``.
+
+    ``services/ingestion._update_crawl_plan`` normally does this as the last
+    cell lands, but only while the row is still ``in_progress``. A row paused
+    (or auto-paused) mid-flight, then resumed, comes back as ``pending`` and
+    would never flip. This sweep is the backstop: it owns the terminal
+    transition so no row can strand with every cell accounted for.
+
+    Returns the number of rows finalized.
+    """
+    from sqlalchemy import text
+
+    result = await session.execute(
+        text(
+            """
+            UPDATE crawl_plan
+            SET status = 'done',
+                completed_at = COALESCE(completed_at, NOW())
+            WHERE status IN ('pending', 'in_progress')
+              AND cells_total IS NOT NULL
+              AND cells_done + cells_failed >= cells_total
+            RETURNING id
+            """
+        )
+    )
+    n = len(result.all())
+    if n:
+        await session.commit()
+        logger.info("crawl planner: finalized %d completed rows", n)
+    return n
+
+
 async def _maybe_auto_pause(session) -> int:  # type: ignore[no-untyped-def]
     """Auto-pause crawl if recent jobs are mostly failing.
 
@@ -310,7 +366,10 @@ async def _maybe_auto_pause(session) -> int:  # type: ignore[no-untyped-def]
     fail_rate = failed / total
     if fail_rate <= 0.5:
         return 0
-    # Pause everything pending so the operator can investigate.
+    # Pause every row that would still dispatch cells, so the operator can
+    # investigate before more gosom quota burns. in_progress rows must be
+    # included: since the resume-cursor change they keep dispatching across
+    # ticks, so pausing only 'pending' would stop nothing.
     result = await session.execute(
         text(
             """
@@ -318,7 +377,8 @@ async def _maybe_auto_pause(session) -> int:  # type: ignore[no-untyped-def]
             SET status = 'paused',
                 error_summary = 'auto-paused: failure rate '
                   || ROUND((:fr * 100)::numeric, 1) || '% in 30m'
-            WHERE status = 'pending'
+            WHERE status IN ('pending', 'in_progress')
+              AND (cells_total IS NULL OR cells_enqueued < cells_total)
             RETURNING id
             """
         ),
