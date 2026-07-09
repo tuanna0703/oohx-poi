@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     )
     dedupe_llm_threshold: float = Field(default=0.65, alias="DEDUPE_LLM_THRESHOLD")
     dedupe_schedule_minutes: int = Field(default=15, alias="DEDUPE_SCHEDULE_MINUTES")
+    # A pass must finish well inside run_dedupe's 20-minute time_limit, or it
+    # is interrupted; with periodic commits an interrupted pass still keeps the
+    # clusters it already committed. Tune down if passes get cut off.
+    dedupe_max_clusters_per_pass: int = Field(
+        default=200, alias="DEDUPE_MAX_CLUSTERS_PER_PASS"
+    )
+    dedupe_commit_every: int = Field(default=25, alias="DEDUPE_COMMIT_EVERY")
 
     # ---- Embedding ----
     embedding_model: str = Field(

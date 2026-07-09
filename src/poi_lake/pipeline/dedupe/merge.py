@@ -201,16 +201,34 @@ class MergeService:
         session: AsyncSession,
         *,
         eps_meters: float | None = None,
+        max_clusters: int | None = None,
+        commit_every: int = 25,
     ) -> dict[str, int]:
-        """Cluster + score + merge all currently-pending processed_pois.
+        """Cluster + score + merge pending processed_pois, committing as it goes.
 
-        Returns counts: ``{clusters, masters_created, members_merged, llm_calls}``.
+        A pass used to hold one transaction across every cluster and commit
+        once at the end. ``run_dedupe`` has a 20-minute ``time_limit``, so once
+        the backlog grew past what fits in 20 minutes (278k rows on production)
+        every pass was interrupted and committed *nothing* — the work was
+        redone and lost, forever. Clusters are independent, so committing every
+        ``commit_every`` of them makes progress durable, and ``max_clusters``
+        keeps a pass comfortably inside the time limit.
+
+        Returns ``{clusters, masters_created, members_merged, llm_calls,
+        clusters_available}``. ``clusters_available`` is the total this pass
+        could see, so a caller can tell whether a backlog remains.
         """
         clusterer = SpatialClusterer()
         cluster_map = await clusterer.cluster(session, eps_meters=eps_meters, only_pending=True)
         groups = clusterer.group(cluster_map)
 
-        stats = {"clusters": 0, "masters_created": 0, "members_merged": 0, "llm_calls": 0}
+        stats = {
+            "clusters": 0,
+            "masters_created": 0,
+            "members_merged": 0,
+            "llm_calls": 0,
+            "clusters_available": len(groups),
+        }
         if not groups:
             return stats
 
@@ -218,7 +236,9 @@ class MergeService:
         src_rows = (await session.execute(select(Source.id, Source.priority))).all()
         priority_by_source = {sid: pri for sid, pri in src_rows}
 
-        for cluster_id, member_ids in groups.items():
+        for member_ids in groups.values():
+            if max_clusters is not None and stats["clusters"] >= max_clusters:
+                break
             stats["clusters"] += 1
             sub = await self._process_one_cluster(
                 session, member_ids, priority_by_source
@@ -226,6 +246,11 @@ class MergeService:
             stats["masters_created"] += sub["masters_created"]
             stats["members_merged"] += sub["members_merged"]
             stats["llm_calls"] += sub["llm_calls"]
+
+            # Durable progress. The sessionmaker sets expire_on_commit=False,
+            # so committing here does not invalidate anything we still hold.
+            if stats["clusters"] % commit_every == 0:
+                await session.commit()
 
         await session.commit()
         return stats

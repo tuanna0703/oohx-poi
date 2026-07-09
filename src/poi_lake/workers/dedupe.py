@@ -1,4 +1,9 @@
-"""Dedupe worker — runs MergeService on every pending row.
+"""Dedupe worker — runs MergeService over a bounded slice of pending rows.
+
+A pass handles at most ``DEDUPE_MAX_CLUSTERS_PER_PASS`` clusters and commits
+every ``DEDUPE_COMMIT_EVERY`` of them, so it finishes inside the actor's
+20-minute ``time_limit`` and keeps whatever it committed if it doesn't.
+Only one pass runs at a time (Redis lock).
 
 Triggered:
   * on demand via ``run_dedupe.send()`` (e.g. admin endpoint, post-batch);
@@ -28,9 +33,32 @@ logger = logging.getLogger(__name__)
     time_limit=20 * 60_000,
 )
 def run_dedupe() -> None:
+    """One dedupe pass, guarded so only one runs at a time.
+
+    The worker runs ``--processes 2``, and a retry can overlap a scheduled
+    tick. Two concurrent passes contend on the same rows: one sits ``idle in
+    transaction`` computing embeddings while the other blocks on
+    ``Lock: transactionid``, burning both execution slots. The lock's TTL
+    exceeds ``time_limit`` so an interrupted pass cannot strand it.
+    """
+    from poi_lake.config import get_settings
+
+    settings = get_settings()
+    lock_ttl_s = 25 * 60  # > the 20-minute time_limit above
+
+    import redis as _redis
+
+    client = _redis.from_url(settings.redis_url)
+    if not client.set("poi-lake:lock:dedupe", "1", ex=lock_ttl_s, nx=True):
+        logger.info("dedupe pass: skipped — another pass holds the lock")
+        return
+
     logger.info("dedupe pass: starting")
-    stats = asyncio.run(_run())
-    logger.info("dedupe pass: done %r", stats)
+    try:
+        stats = asyncio.run(_run())
+        logger.info("dedupe pass: done %r", stats)
+    finally:
+        client.delete("poi-lake:lock:dedupe")
 
 
 async def _run() -> dict[str, int]:
@@ -45,7 +73,11 @@ async def _run() -> dict[str, int]:
     try:
         async with session_scope() as session:
             svc = MergeService(resolver=resolver)
-            return await svc.dedupe_pending(session)
+            return await svc.dedupe_pending(
+                session,
+                max_clusters=settings.dedupe_max_clusters_per_pass,
+                commit_every=settings.dedupe_commit_every,
+            )
     finally:
         engine = get_engine()
         await engine.dispose()
