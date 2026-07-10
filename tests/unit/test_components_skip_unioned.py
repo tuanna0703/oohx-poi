@@ -19,11 +19,13 @@ from poi_lake.pipeline.dedupe.merge import MergeService
 class _CountingResolver:
     def __init__(self, same: bool = True, cached: bool = False) -> None:
         self.calls: list[tuple[int, int]] = []
+        self.distances: list[object] = []
         self.same = same
         self.cached = cached
 
-    async def resolve(self, a: dict, b: dict) -> object:
+    async def resolve(self, a: dict, b: dict, **kw: object) -> object:
         self.calls.append((a["id"], b["id"]))
+        self.distances.append(kw.get("distance_meters"))
         return SimpleNamespace(same=self.same, confidence=0.9, reason="test", cached=self.cached)
 
 

@@ -4,9 +4,10 @@ Used when ``decide(score) == NEEDS_LLM``. Sends the two records as JSON to
 Claude Opus 4.7 and asks for a strict ``{"same": bool, "confidence": float,
 "reason": str}`` answer.
 
-Caches by a deterministic ``(min_id, max_id)`` Redis key with 7-day TTL so
-the same pair is never resolved twice. (Cluster re-runs and worker retries
-both hit this cache.)
+Caches by a deterministic ``(min_id, max_id)`` Redis key so the same pair is
+never resolved twice. (Cluster re-runs and worker retries both hit this cache.)
+The key carries a ``v2`` namespace: a cached verdict answers the prompt that
+was in force when it was written, so changing the prompt must change the key.
 """
 
 from __future__ import annotations
@@ -30,7 +31,9 @@ logger = logging.getLogger(__name__)
 # re-merge pass re-asks exactly the pairs the normal pass already paid for, and
 # a 7-day window meant most of those were re-billed.
 _CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
-_CACHE_KEY_PREFIX = "poi-lake:dedupe:llm:"
+# v2: the prompt now carries the pair's separation in metres. A v1 verdict
+# answered a different question -- one asked without any geometry at all.
+_CACHE_KEY_PREFIX = "poi-lake:dedupe:llm:v2:"
 
 _PROMPT_SYSTEM = (
     "You compare two POI records and decide if they describe the same physical "
@@ -46,10 +49,22 @@ RECORD A:
 
 RECORD B:
 {b_json}
+{distance_block}
+Consider: name, address, phone, website, brand. Slight name or address
+variations are common — focus on whether they could plausibly be the same
+place."""
 
-Consider: name, address, phone, website, brand, coordinates. Slight name
-or address variations are common — focus on whether they could plausibly
-be the same place."""
+# The records themselves carry no coordinates, so the separation has to be
+# stated. Without it the model can only trust the address string, and
+# Vietnamese ward/district text is routinely mis-segmented: two rows 0 m apart
+# under one plus code were rejected for sitting in "different districts".
+_DISTANCE_BLOCK = """
+Straight-line distance between the two coordinates: {meters:.1f} m.
+Weigh this above the address strings, which are often mis-segmented while the
+coordinates are not. A large separation is strong evidence the records differ.
+A small one is necessary but not sufficient — distinct businesses, and distinct
+ATMs of one bank, can sit metres apart and share a brand and a hotline number.
+"""
 
 
 @dataclass(slots=True, frozen=True)
@@ -110,7 +125,9 @@ class LLMResolver:
         h = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
         return f"{_CACHE_KEY_PREFIX}h:{h}"
 
-    async def resolve(self, record_a: dict, record_b: dict) -> LLMResolution:
+    async def resolve(
+        self, record_a: dict, record_b: dict, *, distance_meters: float | None = None
+    ) -> LLMResolution:
         key = self._cache_key(record_a, record_b)
         rc = await self._get_redis()
         cached = await rc.get(key)
@@ -128,7 +145,7 @@ class LLMResolver:
                 logger.warning("invalid cache value for %s — re-querying", key)
 
         try:
-            result = await self._call_llm(record_a, record_b)
+            result = await self._call_llm(record_a, record_b, distance_meters)
             LLM_CALLS.labels(self._model, "hit").inc()
         except Exception:
             LLM_CALLS.labels(self._model, "error").inc()
@@ -140,11 +157,16 @@ class LLMResolver:
         )
         return result
 
-    async def _call_llm(self, record_a: dict, record_b: dict) -> LLMResolution:
+    async def _call_llm(
+        self, record_a: dict, record_b: dict, distance_meters: float | None = None
+    ) -> LLMResolution:
         client = self._get_anthropic()
         body = _PROMPT_TEMPLATE.format(
             a_json=json.dumps(record_a, ensure_ascii=False, sort_keys=True),
             b_json=json.dumps(record_b, ensure_ascii=False, sort_keys=True),
+            distance_block=(
+                "" if distance_meters is None else _DISTANCE_BLOCK.format(meters=distance_meters)
+            ),
         )
 
         # The Anthropic SDK is sync; run it in a thread so we don't block the

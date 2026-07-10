@@ -19,6 +19,7 @@ the cheap "process the new arrivals only" path.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from collections.abc import Sequence
@@ -399,6 +400,7 @@ class MergeService:
             }
             for r in rows:
                 r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
+            await self._attach_coords(session, rows)
 
             try:
                 components, usage = await self._components_of(
@@ -490,11 +492,12 @@ class MergeService:
         for r in rows:
             r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
 
-        # Singleton fast path.
+        # Singleton fast path — no pair, so no distance needed.
         if len(rows) == 1:
             await self._make_master(session, rows, priority_by_source)
             return {"masters_created": 1, "members_merged": 1, **LLMUsage().as_stats()}
 
+        await self._attach_coords(session, rows)
         components, usage = await self._components_of(rows, deadline)
 
         masters_created = 0
@@ -509,6 +512,32 @@ class MergeService:
             "members_merged": members_merged,
             **usage.as_stats(),
         }
+
+    async def _attach_coords(
+        self, session: AsyncSession, rows: Sequence[ProcessedPOI]
+    ) -> None:
+        """Stash lat/lon on each row so the resolver can be told the distance.
+
+        One query per cluster, not one per pair. ``location`` is a Geography,
+        so it has to be cast before ST_X/ST_Y will take it.
+        """
+        if not rows:
+            return
+        found = (
+            await session.execute(
+                text(
+                    "SELECT id, ST_Y(location::geometry) AS lat, "
+                    "ST_X(location::geometry) AS lon "
+                    "FROM processed_pois WHERE id = ANY(:ids)"
+                ),
+                {"ids": [r.id for r in rows]},
+            )
+        ).all()
+        coords = {rid: (lat, lon) for rid, lat, lon in found}
+        for r in rows:
+            lat, lon = coords.get(r.id, (None, None))
+            r._lat = lat  # type: ignore[attr-defined]
+            r._lon = lon  # type: ignore[attr-defined]
 
     async def _components_of(
         self, rows: Sequence[ProcessedPOI], deadline: float | None = None
@@ -603,7 +632,9 @@ class MergeService:
     async def _resolve_pair(self, a: ProcessedPOI, b: ProcessedPOI) -> LLMResolution:
         a_dict = _serialize_for_llm(a)
         b_dict = _serialize_for_llm(b)
-        return await self.resolver.resolve(a_dict, b_dict)  # type: ignore[union-attr]
+        return await self.resolver.resolve(  # type: ignore[union-attr]
+            a_dict, b_dict, distance_meters=_pair_distance_meters(a, b)
+        )
 
     async def _build_master_fields(
         self,
@@ -948,8 +979,38 @@ class MergeService:
         )
 
 
+_EARTH_RADIUS_M = 6_371_008.8  # IUGG mean radius
+
+
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * _EARTH_RADIUS_M * math.asin(math.sqrt(h))
+
+
+def _pair_distance_meters(a: ProcessedPOI, b: ProcessedPOI) -> float | None:
+    """Separation in metres, or None when coordinates were not attached.
+
+    ``_attach_coords`` populates ``_lat``/``_lon``; callers that build rows by
+    hand (tests) leave them off, and the resolver simply omits the distance.
+    Over a cluster's span, haversine and PostGIS geography agree to well under
+    a metre, so it is not worth a round-trip per pair.
+    """
+    lat1, lon1 = getattr(a, "_lat", None), getattr(a, "_lon", None)
+    lat2, lon2 = getattr(b, "_lat", None), getattr(b, "_lon", None)
+    if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+        return None
+    return _haversine_meters(lat1, lon1, lat2, lon2)
+
+
 def _serialize_for_llm(r: ProcessedPOI) -> dict:
-    """Strip ProcessedPOI down to fields useful for LLM judgement."""
+    """Strip ProcessedPOI down to fields useful for LLM judgement.
+
+    Note the absence of coordinates: they are passed to the resolver as a
+    single pairwise distance instead, because LLMs do not do haversine.
+    """
     return {
         "id": r.id,
         "name": r.name_original,

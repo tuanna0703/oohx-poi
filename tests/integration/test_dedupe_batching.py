@@ -166,7 +166,7 @@ class _BrokenResolver:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def resolve(self, a: dict, b: dict) -> object:
+    async def resolve(self, a: dict, b: dict, **kw: object) -> object:
         self.calls += 1
         raise RuntimeError("credit balance is too low")
 
@@ -211,7 +211,7 @@ class _NoCreditResolver:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def resolve(self, a: dict, b: dict) -> object:
+    async def resolve(self, a: dict, b: dict, **kw: object) -> object:
         import anthropic
         import httpx
 
@@ -314,7 +314,7 @@ async def test_deadline_stops_llm_calls_inside_a_cluster(
         def __init__(self) -> None:
             self.calls = 0
 
-        async def resolve(self, a: dict, b: dict) -> object:
+        async def resolve(self, a: dict, b: dict, **kw: object) -> object:
             self.calls += 1
             raise AssertionError("resolver must not be called past the deadline")
 
