@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from admin.lib.llm import breaker_banner
 from admin.lib.queries import (
     hourly_ingestion_24h,
     jobs_status_breakdown,
@@ -13,6 +14,9 @@ from admin.lib.queries import (
 
 st.set_page_config(page_title="Dashboard — POI Lake", layout="wide")
 st.title("Dashboard")
+
+# A paused pipeline must be the first thing an operator sees.
+breaker_banner()
 
 if st.button("Refresh"):
     st.cache_data.clear()

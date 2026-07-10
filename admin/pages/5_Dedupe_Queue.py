@@ -14,6 +14,7 @@ from __future__ import annotations
 import streamlit as st
 
 from admin.lib.api import post_json
+from admin.lib.llm import breaker_banner
 from admin.lib.queries import pending_clusters
 
 st.set_page_config(page_title="Dedupe Queue — POI Lake", layout="wide")
@@ -22,6 +23,8 @@ st.caption(
     "Pending processed_pois grouped by spatial cluster. Use the buttons "
     "to manually resolve cases the auto-merge thresholds didn't decide."
 )
+
+breaker_banner()
 
 eps = st.slider("Cluster radius (meters)", 10, 500, 55, step=5)
 if st.button("Re-cluster"):

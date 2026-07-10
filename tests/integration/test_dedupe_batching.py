@@ -205,6 +205,95 @@ async def test_broken_llm_resolver_does_not_kill_the_pass(
     assert await _merged_count(three_clusters) == 6
 
 
+class _NoCreditResolver:
+    """Anthropic saying the wallet is empty — a failure retrying cannot fix."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def resolve(self, a: dict, b: dict) -> object:
+        import anthropic
+        import httpx
+
+        self.calls += 1
+        req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        msg = "Your credit balance is too low to access the Anthropic API."
+        raise anthropic.BadRequestError(
+            message=msg,
+            response=httpx.Response(400, request=req, json={"error": {"message": msg}}),
+            body=None,
+        )
+
+
+async def test_no_credit_aborts_the_pass_but_keeps_committed_work(
+    three_clusters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fatal resolver failure must stop, not degrade.
+
+    Merging NEEDS_LLM pairs without the resolver writes each row to its own
+    master and marks it 'merged'; the clusterer only looks at 'pending' rows,
+    so those duplicates are permanent. Stopping is the recoverable option.
+    """
+    from poi_lake.pipeline.dedupe import decision as decision_mod
+    from poi_lake.pipeline.dedupe import merge as merge_mod
+    from poi_lake.pipeline.dedupe.llm_state import LLMUnavailableError
+
+    # Don't lean on the scorer's thresholds: state the decisions outright.
+    # Each cluster holds one pair, so the first call is cluster #1's.
+    calls = {"n": 0}
+
+    def decide_second_cluster_needs_llm(score):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return decision_mod.DedupeDecision.AUTO_MERGE
+        return decision_mod.DedupeDecision.NEEDS_LLM
+
+    monkeypatch.setattr(merge_mod, "decide", decide_second_cluster_needs_llm)
+
+    resolver = _NoCreditResolver()
+    svc = MergeService(resolver=resolver)  # type: ignore[arg-type]
+
+    sm = get_sessionmaker()
+    with pytest.raises(LLMUnavailableError, match="credit balance"):
+        async with sm() as s:
+            await svc.dedupe_pending(s, commit_every=1)
+
+    assert resolver.calls == 1, "must abort on the first fatal error, not retry per pair"
+    # Cluster #1 was committed before the failure; it is not rolled back.
+    assert await _merged_count(three_clusters) == 2
+
+
+class _FakeClock:
+    """Zero, then far past the budget. Replaces the name `time` inside the
+    merge module only — patching the real `time.monotonic` would also rewire
+    asyncpg and SQLAlchemy, which call it constantly."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def monotonic(self) -> float:
+        self.calls += 1
+        return 0.0 if self.calls <= 2 else 99.0
+
+
+async def test_max_seconds_stops_the_pass(
+    three_clusters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wall-clock is the real bound: a cluster costs ms without LLM, seconds with."""
+    from poi_lake.pipeline.dedupe import merge as merge_mod
+
+    monkeypatch.setattr(merge_mod, "time", _FakeClock())
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        stats = await MergeService(resolver=None).dedupe_pending(
+            s, commit_every=1, max_seconds=10.0
+        )
+
+    assert stats["clusters"] == 1, "budget spent after the first cluster"
+    assert stats["clusters_available"] >= 3
+
+
 async def test_committed_clusters_survive_an_interrupted_pass(
     three_clusters: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

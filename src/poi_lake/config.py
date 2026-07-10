@@ -84,6 +84,11 @@ class Settings(BaseSettings):
         default=200, alias="DEDUPE_MAX_CLUSTERS_PER_PASS"
     )
     dedupe_commit_every: int = Field(default=25, alias="DEDUPE_COMMIT_EVERY")
+    # The guard that actually holds. A cluster costs milliseconds with the LLM
+    # resolver off and seconds with it on, so bounding a pass by cluster count
+    # alone lets it blow through the 20-minute time_limit — measured: 200
+    # clusters ran 50s without the resolver and past 17min with it.
+    dedupe_max_seconds: float = Field(default=900.0, alias="DEDUPE_MAX_SECONDS")
 
     # ---- Embedding ----
     embedding_model: str = Field(

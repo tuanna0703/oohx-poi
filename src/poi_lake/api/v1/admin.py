@@ -704,6 +704,36 @@ async def create_api_client(
     )
 
 
+# ---------------------------------------------------------------- LLM breaker
+
+
+class LLMStatus(BaseModel):
+    paused: bool
+    reason: str | None = None
+    since: str | None = None
+
+
+@router.get("/llm/status", response_model=LLMStatus)
+async def llm_status() -> LLMStatus:
+    """Is dedupe paused because Anthropic rejected us?"""
+    from poi_lake.pipeline.dedupe.llm_state import get_disabled
+
+    state = await get_disabled()
+    if state is None:
+        return LLMStatus(paused=False)
+    return LLMStatus(paused=True, reason=state.get("reason"), since=state.get("since"))
+
+
+@router.post("/llm/resume", response_model=LLMStatus)
+async def llm_resume() -> LLMStatus:
+    """Clear the breaker after topping up credit. Dedupe resumes on the next tick."""
+    from poi_lake.pipeline.dedupe.llm_state import enable
+
+    was_paused = await enable()
+    logger.info("admin: LLM resume requested (was_paused=%s)", was_paused)
+    return LLMStatus(paused=False)
+
+
 def _to_out(job: IngestionJob, source_code: str) -> IngestionJobOut:
     return IngestionJobOut(
         id=job.id,

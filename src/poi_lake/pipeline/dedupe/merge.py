@@ -19,6 +19,7 @@ the cheap "process the new arrivals only" path.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,6 +39,7 @@ from poi_lake.observability import DEDUPE_DECISIONS, MERGE_MASTERS_CREATED
 from poi_lake.observability.metrics import MERGE_MEMBERS
 from poi_lake.pipeline.dedupe.clusterer import SpatialClusterer
 from poi_lake.pipeline.dedupe.decision import DedupeDecision, decide
+from poi_lake.pipeline.dedupe.llm_state import LLMUnavailableError, is_fatal_llm_error
 from poi_lake.pipeline.dedupe.resolver import LLMResolver, LLMResolution
 from poi_lake.pipeline.dedupe.similarity import PairScore, PairSimilarityScorer
 
@@ -209,6 +211,7 @@ class MergeService:
         eps_meters: float | None = None,
         max_clusters: int | None = None,
         commit_every: int = 25,
+        max_seconds: float | None = None,
     ) -> dict[str, int]:
         """Cluster + score + merge pending processed_pois, committing as it goes.
 
@@ -224,8 +227,18 @@ class MergeService:
         llm_errors, clusters_available}``. ``clusters_available`` is the total
         this pass could see, so a caller can tell whether a backlog remains;
         ``llm_errors`` is non-zero when the resolver was disabled mid-pass.
+
+        ``max_seconds`` is the real safety belt. ``max_clusters`` bounds work in
+        the wrong unit: 200 clusters take under a minute with the resolver off
+        and over seventeen with it on, because each NEEDS_LLM pair is an API
+        round-trip. A wall-clock stop keeps a pass inside the actor's
+        ``time_limit`` whatever the mix of clusters happens to be.
+
+        Raises ``LLMUnavailableError`` if the resolver fails fatally (no credit,
+        dead key) — committed clusters are kept, the rest is left pending.
         """
         self._llm_disabled_reason = None  # a fresh pass retries the API once
+        started = time.monotonic()
 
         clusterer = SpatialClusterer()
         cluster_map = await clusterer.cluster(session, eps_meters=eps_meters, only_pending=True)
@@ -249,10 +262,24 @@ class MergeService:
         for member_ids in groups.values():
             if max_clusters is not None and stats["clusters"] >= max_clusters:
                 break
+            if max_seconds is not None and time.monotonic() - started >= max_seconds:
+                logger.info(
+                    "dedupe: stopping at %d clusters — wall-clock budget spent",
+                    stats["clusters"],
+                )
+                break
             stats["clusters"] += 1
-            sub = await self._process_one_cluster(
-                session, member_ids, priority_by_source
-            )
+            try:
+                sub = await self._process_one_cluster(
+                    session, member_ids, priority_by_source
+                )
+            except LLMUnavailableError:
+                # Keep what this pass already merged, then let the caller latch
+                # the breaker. Rolling back here would discard good work for a
+                # failure that has nothing to do with it.
+                stats["clusters"] -= 1
+                await session.commit()
+                raise
             stats["masters_created"] += sub["masters_created"]
             stats["members_merged"] += sub["members_merged"]
             stats["llm_calls"] += sub["llm_calls"]
@@ -341,16 +368,18 @@ class MergeService:
                     try:
                         resolved = await self._resolve_pair(a, b)
                     except Exception as exc:
-                        # An unreachable or unpaid Anthropic API used to kill the
-                        # whole pass on the first NEEDS_LLM pair. Degrade instead:
-                        # leave the pair unresolved (they stay separate masters,
-                        # exactly as when no resolver is configured) and stop
-                        # calling the API for the rest of this pass rather than
-                        # retrying it once per pair.
-                        #
                         # dramatiq's TimeLimitExceeded derives from BaseException,
-                        # so `except Exception` cannot swallow the actor's deadline.
+                        # so `except Exception` cannot swallow the actor deadline.
                         llm_errors += 1
+                        if is_fatal_llm_error(exc):
+                            # Out of credit, or a dead key. Abort the pass rather
+                            # than merging NEEDS_LLM pairs into separate masters:
+                            # nothing ever revisits a row once it is 'merged', so
+                            # carrying on would manufacture duplicates for good.
+                            raise LLMUnavailableError(str(exc)[:300]) from exc
+                        # Transient (rate limit, timeout, 5xx). Skip the LLM for
+                        # the rest of this pass instead of retrying once per pair;
+                        # the next pass starts clean.
                         self._llm_disabled_reason = str(exc)[:200]
                         logger.warning(
                             "dedupe: LLM resolver disabled for this pass — %s",
