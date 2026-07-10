@@ -76,6 +76,14 @@ class Settings(BaseSettings):
         default=0.85, alias="DEDUPE_AUTO_MERGE_THRESHOLD"
     )
     dedupe_llm_threshold: float = Field(default=0.65, alias="DEDUPE_LLM_THRESHOLD")
+    # Beyond this separation a high similarity score is not enough to merge on
+    # its own — the pair goes to the resolver instead. Chain brands defeat every
+    # non-geometric field at once: two Sacombank ATMs 217 m apart matched on
+    # name, phone, website and brand and were merged without anyone asking.
+    # DBSCAN's eps only bounds the link between *neighbours*; clusters chain.
+    dedupe_auto_merge_max_meters: float = Field(
+        default=50.0, alias="DEDUPE_AUTO_MERGE_MAX_METERS"
+    )
     dedupe_schedule_minutes: int = Field(default=15, alias="DEDUPE_SCHEDULE_MINUTES")
     # A pass must finish well inside run_dedupe's 20-minute time_limit, or it
     # is interrupted; with periodic commits an interrupted pass still keeps the

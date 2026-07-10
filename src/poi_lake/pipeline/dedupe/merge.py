@@ -29,6 +29,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from poi_lake.config import get_settings
 from poi_lake.db.models import (
     MasterPOIStatus,
     MergeStatus,
@@ -163,10 +164,17 @@ def _source_id_of(r: ProcessedPOI) -> int:
 class MergeService:
     """Top-level orchestrator. Run once per dedupe pass."""
 
-    def __init__(self, resolver: LLMResolver | None = None) -> None:
+    def __init__(
+        self, resolver: LLMResolver | None = None, *, auto_merge_max_meters: float | None = None
+    ) -> None:
         self.scorer = PairSimilarityScorer()
         self.resolver = resolver  # may be None (skips NEEDS_LLM pairs)
         self.builder = MasterRecordBuilder()
+        self._auto_merge_max_meters = (
+            auto_merge_max_meters
+            if auto_merge_max_meters is not None
+            else get_settings().dedupe_auto_merge_max_meters
+        )
         # Set on the first resolver failure; suppresses further LLM calls for
         # the rest of the pass. Reset at the start of each dedupe_pending().
         self._llm_disabled_reason: str | None = None
@@ -579,6 +587,22 @@ class MergeService:
                     continue
                 score = self.scorer.score(a, b)
                 d = decide(score.composite)
+                separation = _pair_distance_meters(a, b)
+                if (
+                    d is DedupeDecision.AUTO_MERGE
+                    and separation is not None
+                    and separation > self._auto_merge_max_meters
+                ):
+                    # The scorer weighs no geometry, so a chain brand can max out
+                    # name, phone, website and brand while being a different
+                    # branch down the road. Do not merge on that evidence alone —
+                    # ask. With the resolver unavailable the pair simply stays
+                    # unmerged, which is the recoverable direction.
+                    logger.info(
+                        "dedupe: auto-merge gated at %.0f m — %s (%d,%d)",
+                        separation, a.name_original, a.id, b.id,
+                    )
+                    d = DedupeDecision.NEEDS_LLM
                 DEDUPE_DECISIONS.labels(d.value).inc()
                 if d is DedupeDecision.AUTO_MERGE:
                     union(a.id, b.id)
