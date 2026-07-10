@@ -146,6 +146,12 @@ class MergeService:
         self.scorer = PairSimilarityScorer()
         self.resolver = resolver  # may be None (skips NEEDS_LLM pairs)
         self.builder = MasterRecordBuilder()
+        # Set on the first resolver failure; suppresses further LLM calls for
+        # the rest of the pass. Reset at the start of each dedupe_pending().
+        self._llm_disabled_reason: str | None = None
+
+    def _resolver_usable(self) -> bool:
+        return self.resolver is not None and self._llm_disabled_reason is None
 
     async def merge_records(
         self,
@@ -215,9 +221,12 @@ class MergeService:
         keeps a pass comfortably inside the time limit.
 
         Returns ``{clusters, masters_created, members_merged, llm_calls,
-        clusters_available}``. ``clusters_available`` is the total this pass
-        could see, so a caller can tell whether a backlog remains.
+        llm_errors, clusters_available}``. ``clusters_available`` is the total
+        this pass could see, so a caller can tell whether a backlog remains;
+        ``llm_errors`` is non-zero when the resolver was disabled mid-pass.
         """
+        self._llm_disabled_reason = None  # a fresh pass retries the API once
+
         clusterer = SpatialClusterer()
         cluster_map = await clusterer.cluster(session, eps_meters=eps_meters, only_pending=True)
         groups = clusterer.group(cluster_map)
@@ -227,6 +236,7 @@ class MergeService:
             "masters_created": 0,
             "members_merged": 0,
             "llm_calls": 0,
+            "llm_errors": 0,
             "clusters_available": len(groups),
         }
         if not groups:
@@ -246,6 +256,7 @@ class MergeService:
             stats["masters_created"] += sub["masters_created"]
             stats["members_merged"] += sub["members_merged"]
             stats["llm_calls"] += sub["llm_calls"]
+            stats["llm_errors"] += sub["llm_errors"]
 
             # Durable progress. The sessionmaker sets expire_on_commit=False,
             # so committing here does not invalidate anything we still hold.
@@ -269,7 +280,12 @@ class MergeService:
             )
         ).scalars().all()
         if not rows:
-            return {"masters_created": 0, "members_merged": 0, "llm_calls": 0}
+            return {
+                "masters_created": 0,
+                "members_merged": 0,
+                "llm_calls": 0,
+                "llm_errors": 0,
+            }
 
         # Attach source_id to each row for the priority tie-breaker. Single
         # query against raw_pois.
@@ -289,7 +305,12 @@ class MergeService:
         # Singleton fast path.
         if len(rows) == 1:
             await self._make_master(session, rows, priority_by_source)
-            return {"masters_created": 1, "members_merged": 1, "llm_calls": 0}
+            return {
+                "masters_created": 1,
+                "members_merged": 1,
+                "llm_calls": 0,
+                "llm_errors": 0,
+            }
 
         # Pairwise scoring + union-find.
         parent: dict[int, int] = {r.id: r.id for r in rows}
@@ -306,6 +327,7 @@ class MergeService:
                 parent[ra] = rb
 
         llm_calls = 0
+        llm_errors = 0
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 a, b = rows[i], rows[j]
@@ -314,11 +336,29 @@ class MergeService:
                 DEDUPE_DECISIONS.labels(d.value).inc()
                 if d is DedupeDecision.AUTO_MERGE:
                     union(a.id, b.id)
-                elif d is DedupeDecision.NEEDS_LLM and self.resolver is not None:
+                elif d is DedupeDecision.NEEDS_LLM and self._resolver_usable():
                     llm_calls += 1
-                    resolved = await self._resolve_pair(a, b)
-                    if resolved.same and resolved.confidence >= 0.6:
-                        union(a.id, b.id)
+                    try:
+                        resolved = await self._resolve_pair(a, b)
+                    except Exception as exc:
+                        # An unreachable or unpaid Anthropic API used to kill the
+                        # whole pass on the first NEEDS_LLM pair. Degrade instead:
+                        # leave the pair unresolved (they stay separate masters,
+                        # exactly as when no resolver is configured) and stop
+                        # calling the API for the rest of this pass rather than
+                        # retrying it once per pair.
+                        #
+                        # dramatiq's TimeLimitExceeded derives from BaseException,
+                        # so `except Exception` cannot swallow the actor's deadline.
+                        llm_errors += 1
+                        self._llm_disabled_reason = str(exc)[:200]
+                        logger.warning(
+                            "dedupe: LLM resolver disabled for this pass — %s",
+                            self._llm_disabled_reason,
+                        )
+                    else:
+                        if resolved.same and resolved.confidence >= 0.6:
+                            union(a.id, b.id)
 
         # Build master per connected component.
         components: dict[int, list[ProcessedPOI]] = {}
@@ -336,6 +376,7 @@ class MergeService:
             "masters_created": masters_created,
             "members_merged": members_merged,
             "llm_calls": llm_calls,
+            "llm_errors": llm_errors,
         }
 
     async def _resolve_pair(self, a: ProcessedPOI, b: ProcessedPOI) -> LLMResolution:

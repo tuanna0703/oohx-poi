@@ -160,6 +160,51 @@ async def test_max_clusters_bounds_the_pass(three_clusters: str) -> None:
     assert pending == 2
 
 
+class _BrokenResolver:
+    """Stands in for Anthropic returning 400 (e.g. credit balance too low)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def resolve(self, a: dict, b: dict) -> object:
+        self.calls += 1
+        raise RuntimeError("credit balance is too low")
+
+
+async def test_broken_llm_resolver_does_not_kill_the_pass(
+    three_clusters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead resolver must degrade the pass, not abort it.
+
+    Production hit exactly this: `anthropic.BadRequestError` on the first
+    NEEDS_LLM pair propagated out of `run_dedupe` and killed every pass.
+    """
+    from poi_lake.pipeline.dedupe import decision as decision_mod
+    from poi_lake.pipeline.dedupe import merge as merge_mod
+
+    # Force every pair down the NEEDS_LLM branch.
+    monkeypatch.setattr(
+        merge_mod, "decide", lambda _score: decision_mod.DedupeDecision.NEEDS_LLM
+    )
+
+    resolver = _BrokenResolver()
+    svc = MergeService(resolver=resolver)  # type: ignore[arg-type]
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        stats = await svc.dedupe_pending(s, commit_every=1)
+
+    assert stats["clusters"] == 3, "the pass must finish all clusters"
+    assert stats["llm_errors"] == 1
+    # One failure disables the resolver: the API is not retried per pair.
+    assert resolver.calls == 1, f"resolver hammered {resolver.calls} times"
+    assert stats["llm_calls"] == 1
+
+    # Unresolved pairs stay separate masters — same as running with no resolver.
+    assert stats["masters_created"] == 6
+    assert await _merged_count(three_clusters) == 6
+
+
 async def test_committed_clusters_survive_an_interrupted_pass(
     three_clusters: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
