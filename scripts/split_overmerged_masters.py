@@ -88,8 +88,12 @@ async def main() -> None:
         svc = MergeService()  # no resolver: splitting re-clusters, it never asks
         total_before = total_after = 0
         for mid in targets:
+            # A savepoint per master. `split_master` can raise after it has
+            # already grown one group of a multi-group master; without this the
+            # half-finished split rides along to the final commit.
             try:
-                result = await svc.split_master(session, mid, eps_meters=args.eps)
+                async with session.begin_nested():
+                    result = await svc.split_master(session, mid, eps_meters=args.eps)
             except ValueError as exc:
                 print(f"  SKIP {mid}: {exc}")
                 continue
