@@ -137,5 +137,16 @@ def _start_crawl_planner_scheduler() -> None:
 # imports this module (admin endpoints reference run_ingestion_job).
 _invoked_as = sys.argv[0] if sys.argv else ""
 if "dramatiq" in _invoked_as:
+    # A restart kills any in-flight pass before its `finally` releases the
+    # dedupe lock, and the 25-minute TTL then blocks every tick. No pass can be
+    # running at boot, so the key is always stale here.
+    from poi_lake.workers.dedupe import clear_stale_lock
+
+    try:
+        clear_stale_lock()
+    except Exception:
+        # Never block worker startup on Redis.
+        logger.exception("could not clear stale dedupe lock")
+
     _start_dedupe_scheduler()
     _start_crawl_planner_scheduler()

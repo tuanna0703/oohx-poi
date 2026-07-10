@@ -103,3 +103,31 @@ async def test_disable_truncates_a_huge_reason() -> None:
     await disable("x" * 5000, rc)
     stored = json.loads(rc.store[LLM_DISABLED_KEY])
     assert len(stored["reason"]) == 500
+
+
+class _SyncFakeRedis:
+    def __init__(self, seeded: bool) -> None:
+        self.store = {"poi-lake:lock:dedupe": "1"} if seeded else {}
+
+    def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
+
+
+def test_stale_dedupe_lock_is_cleared_at_boot(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A killed worker leaves the lock behind; boot must drop it.
+
+    Otherwise the 25-minute TTL makes every scheduled tick log
+    "skipped — another pass holds the lock" and dedupe stalls after a deploy.
+    """
+    import redis as _redis
+
+    from poi_lake.workers.dedupe import DEDUPE_LOCK_KEY, clear_stale_lock
+
+    fake = _SyncFakeRedis(seeded=True)
+    monkeypatch.setattr(_redis, "from_url", lambda _url: fake)
+
+    clear_stale_lock()
+    assert DEDUPE_LOCK_KEY not in fake.store
+
+    # Second boot, nothing stranded — must not blow up.
+    clear_stale_lock()

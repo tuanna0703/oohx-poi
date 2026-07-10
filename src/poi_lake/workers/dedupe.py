@@ -36,6 +36,26 @@ from poi_lake.pipeline.dedupe.llm_state import (
 
 logger = logging.getLogger(__name__)
 
+DEDUPE_LOCK_KEY = "poi-lake:lock:dedupe"
+
+
+def clear_stale_lock() -> None:
+    """Drop a dedupe lock stranded by a killed worker.
+
+    The lock has a 25-minute TTL so an interrupted pass cannot hold it forever.
+    But `docker compose up -d worker` kills the process mid-pass, `finally`
+    never runs, and every scheduled tick then logs "skipped — another pass holds
+    the lock" for up to 25 minutes. Nothing can legitimately hold it at boot:
+    no pass has started yet.
+    """
+    import redis as _redis
+
+    from poi_lake.config import get_settings
+
+    client = _redis.from_url(get_settings().redis_url)
+    if client.delete(DEDUPE_LOCK_KEY):
+        logger.warning("cleared a dedupe lock stranded by a previous worker")
+
 
 @dramatiq.actor(
     queue_name="dedupe",
@@ -61,7 +81,7 @@ def run_dedupe() -> None:
     import redis as _redis
 
     client = _redis.from_url(settings.redis_url)
-    if not client.set("poi-lake:lock:dedupe", "1", ex=lock_ttl_s, nx=True):
+    if not client.set(DEDUPE_LOCK_KEY, "1", ex=lock_ttl_s, nx=True):
         logger.info("dedupe pass: skipped — another pass holds the lock")
         return
 
@@ -70,7 +90,7 @@ def run_dedupe() -> None:
         stats = asyncio.run(_run())
         logger.info("dedupe pass: done %r", stats)
     finally:
-        client.delete("poi-lake:lock:dedupe")
+        client.delete(DEDUPE_LOCK_KEY)
 
 
 async def _run() -> dict[str, Any]:

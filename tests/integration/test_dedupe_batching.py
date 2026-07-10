@@ -294,6 +294,48 @@ async def test_max_seconds_stops_the_pass(
     assert stats["clusters_available"] >= 3
 
 
+async def test_deadline_stops_llm_calls_inside_a_cluster(
+    three_clusters: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget must bite mid-cluster, not only between clusters.
+
+    One dense cluster is O(n²) pairs, each an LLM round-trip. Production ran a
+    single cluster past the actor's 20-minute time_limit while the per-cluster
+    check sat unread at the top of the loop.
+    """
+    from poi_lake.pipeline.dedupe import decision as decision_mod
+    from poi_lake.pipeline.dedupe import merge as merge_mod
+
+    monkeypatch.setattr(
+        merge_mod, "decide", lambda _s: decision_mod.DedupeDecision.NEEDS_LLM
+    )
+
+    class _CountingResolver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def resolve(self, a: dict, b: dict) -> object:
+            self.calls += 1
+            raise AssertionError("resolver must not be called past the deadline")
+
+    resolver = _CountingResolver()
+    svc = MergeService(resolver=resolver)  # type: ignore[arg-type]
+
+    rows = []  # a cluster's rows; content is irrelevant, only the deadline is
+    sm = get_sessionmaker()
+    async with sm() as s:
+        from sqlalchemy import select
+
+        rows = list((await s.execute(select(ProcessedPOI).limit(2))).scalars().all())
+
+    # Deadline already in the past.
+    components, calls, errors = await svc._components_of(rows, deadline=0.0)
+
+    assert resolver.calls == 0, "no LLM call may be made after the deadline"
+    assert calls == 0
+    assert len(components) == 2, "unresolved pairs stay separate, to retry next pass"
+
+
 async def test_committed_clusters_survive_an_interrupted_pass(
     three_clusters: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

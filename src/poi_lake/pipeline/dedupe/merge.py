@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -159,7 +161,7 @@ class MergeService:
         self,
         session: AsyncSession,
         processed_poi_ids: list[int],
-    ) -> int | None:
+    ) -> uuid.UUID | None:
         """Force-merge the given pending records into one master_pois row.
 
         Used by the admin UI's manual-override path. Skips any rows that are
@@ -271,7 +273,10 @@ class MergeService:
             stats["clusters"] += 1
             try:
                 sub = await self._process_one_cluster(
-                    session, member_ids, priority_by_source
+                    session,
+                    member_ids,
+                    priority_by_source,
+                    deadline=None if max_seconds is None else started + max_seconds,
                 )
             except LLMUnavailableError:
                 # Keep what this pass already merged, then let the caller latch
@@ -293,6 +298,148 @@ class MergeService:
         await session.commit()
         return stats
 
+    async def remerge_masters(
+        self,
+        session: AsyncSession,
+        *,
+        ids: list[int] | None = None,
+        eps_meters: float | None = None,
+        max_clusters: int | None = None,
+        commit_every: int = 25,
+        max_seconds: float | None = None,
+    ) -> dict[str, int]:
+        """Fold duplicate masters together — the ``include_existing_masters``
+        pass this module's docstring has promised since Phase 4.
+
+        The normal pass only ever looks at ``merge_status = 'pending'`` rows, so
+        two masters that should be one stay that way forever. That happens
+        whenever a NEEDS_LLM pair is decided without the resolver: each row
+        becomes its own master. This pass re-clusters rows *regardless of
+        merge_status*, re-scores them (with the LLM), and folds each component
+        into a single surviving master.
+
+        The survivor keeps its id — see ``_grow_master``. Losers become
+        ``merged_away`` with ``merged_into`` set, so the API stops serving them
+        and consumers can follow the pointer.
+
+        ``ids`` restricts the working set (e.g. rows merged during an outage).
+        """
+        self._llm_disabled_reason = None
+        started = time.monotonic()
+
+        clusterer = SpatialClusterer()
+        cluster_map = await clusterer.cluster(
+            session, eps_meters=eps_meters, only_pending=False, ids=ids
+        )
+        groups = clusterer.group(cluster_map)
+
+        stats = {
+            "clusters": 0,
+            "masters_merged_away": 0,
+            "members_moved": 0,
+            "llm_calls": 0,
+            "llm_errors": 0,
+            "clusters_available": len(groups),
+        }
+        if not groups:
+            return stats
+
+        src_rows = (await session.execute(select(Source.id, Source.priority))).all()
+        priority_by_source = {sid: pri for sid, pri in src_rows}
+
+        for member_ids in groups.values():
+            if max_clusters is not None and stats["clusters"] >= max_clusters:
+                break
+            if max_seconds is not None and time.monotonic() - started >= max_seconds:
+                logger.info(
+                    "remerge: stopping at %d clusters — wall-clock budget spent",
+                    stats["clusters"],
+                )
+                break
+            if len(member_ids) < 2:
+                continue  # a lone row cannot be a duplicate of anything
+
+            rows = (
+                await session.execute(
+                    select(ProcessedPOI).where(ProcessedPOI.id.in_(member_ids))
+                )
+            ).scalars().all()
+            masters = {r.merged_into for r in rows if r.merged_into is not None}
+            has_pending = any(r.merge_status == MergeStatus.PENDING.value for r in rows)
+            if len(masters) < 2 and not has_pending:
+                continue  # already one master, nothing to fold
+
+            stats["clusters"] += 1
+            raw_to_source = {
+                rid: sid
+                for rid, sid in (
+                    await session.execute(
+                        select(RawPOI.id, RawPOI.source_id).where(
+                            RawPOI.id.in_({r.raw_poi_id for r in rows})
+                        )
+                    )
+                ).all()
+            }
+            for r in rows:
+                r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
+
+            try:
+                components, calls, errs = await self._components_of(
+                    rows, None if max_seconds is None else started + max_seconds
+                )
+            except LLMUnavailableError:
+                await session.commit()
+                raise
+            stats["llm_calls"] += calls
+            stats["llm_errors"] += errs
+
+            for members in components:
+                existing = [m.merged_into for m in members if m.merged_into is not None]
+                if not existing:
+                    continue  # untouched pending rows — leave them to dedupe_pending
+                survivor = await self._pick_survivor(session, set(existing))
+                losers = [m for m in set(existing) if m != survivor]
+                if not losers and len(members) == len(
+                    [m for m in members if m.merged_into == survivor]
+                ):
+                    continue  # component already belongs entirely to one master
+                await self._grow_master(
+                    session, survivor, members, priority_by_source, losers
+                )
+                stats["masters_merged_away"] += len(losers)
+                stats["members_moved"] += len(members)
+
+            if stats["clusters"] % commit_every == 0:
+                await session.commit()
+
+        await session.commit()
+        return stats
+
+    async def _pick_survivor(
+        self, session: AsyncSession, master_ids: set[uuid.UUID]
+    ) -> uuid.UUID:
+        """The master other rows fold into: most sources wins, then oldest.
+
+        Oldest breaks the tie because downstream consumers (the Data Engine
+        keys ``source.pois.external_id`` on this id) have seen it longest.
+        """
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id FROM master_pois
+                    WHERE id = ANY(CAST(:ids AS UUID[]))
+                    ORDER BY sources_count DESC, created_at ASC, id ASC
+                    LIMIT 1
+                    """
+                ),
+                {"ids": [str(x) for x in master_ids]},
+            )
+        ).first()
+        if row is None:  # pragma: no cover - ids come from processed_pois FKs
+            raise ValueError(f"no master_pois rows for {master_ids}")
+        return row[0]  # type: ignore[no-any-return]
+
     # -------------------------------------------------------------- internals
 
     async def _process_one_cluster(
@@ -300,6 +447,7 @@ class MergeService:
         session: AsyncSession,
         member_ids: list[int],
         priority_by_source: dict[int, int],
+        deadline: float | None = None,
     ) -> dict[str, int]:
         rows = (
             await session.execute(
@@ -339,7 +487,36 @@ class MergeService:
                 "llm_errors": 0,
             }
 
-        # Pairwise scoring + union-find.
+        components, llm_calls, llm_errors = await self._components_of(rows, deadline)
+
+        masters_created = 0
+        members_merged = 0
+        for members in components:
+            await self._make_master(session, members, priority_by_source)
+            masters_created += 1
+            members_merged += len(members)
+
+        return {
+            "masters_created": masters_created,
+            "members_merged": members_merged,
+            "llm_calls": llm_calls,
+            "llm_errors": llm_errors,
+        }
+
+    async def _components_of(
+        self, rows: Sequence[ProcessedPOI], deadline: float | None = None
+    ) -> tuple[list[list[ProcessedPOI]], int, int]:
+        """Score every pair, union the confirmed-same ones, return components.
+
+        Shared by the pending pass and the re-merge pass so both agree on what
+        "the same place" means. Returns ``(components, llm_calls, llm_errors)``.
+
+        ``deadline`` (a ``time.monotonic()`` value) stops resolving further
+        pairs once the pass has spent its budget. A per-cluster check is not
+        enough: one dense cluster is O(n²) pairs, each an LLM round-trip, and a
+        single cluster ran past the actor's 20-minute time_limit in production.
+        Pairs left unscored simply stay unmerged and are revisited next pass.
+        """
         parent: dict[int, int] = {r.id: r.id for r in rows}
 
         def find(x: int) -> int:
@@ -364,6 +541,13 @@ class MergeService:
                 if d is DedupeDecision.AUTO_MERGE:
                     union(a.id, b.id)
                 elif d is DedupeDecision.NEEDS_LLM and self._resolver_usable():
+                    if deadline is not None and time.monotonic() >= deadline:
+                        # Out of budget mid-cluster. Leave the rest of the pairs
+                        # unresolved rather than overrunning the actor's
+                        # time_limit, which would discard the whole pass.
+                        self._llm_disabled_reason = "pass budget spent"
+                        logger.info("dedupe: LLM budget spent mid-cluster")
+                        continue
                     llm_calls += 1
                     try:
                         resolved = await self._resolve_pair(a, b)
@@ -389,37 +573,27 @@ class MergeService:
                         if resolved.same and resolved.confidence >= 0.6:
                             union(a.id, b.id)
 
-        # Build master per connected component.
-        components: dict[int, list[ProcessedPOI]] = {}
+        grouped: dict[int, list[ProcessedPOI]] = {}
         for r in rows:
-            components.setdefault(find(r.id), []).append(r)
-
-        masters_created = 0
-        members_merged = 0
-        for members in components.values():
-            await self._make_master(session, members, priority_by_source)
-            masters_created += 1
-            members_merged += len(members)
-
-        return {
-            "masters_created": masters_created,
-            "members_merged": members_merged,
-            "llm_calls": llm_calls,
-            "llm_errors": llm_errors,
-        }
+            grouped.setdefault(find(r.id), []).append(r)
+        return list(grouped.values()), llm_calls, llm_errors
 
     async def _resolve_pair(self, a: ProcessedPOI, b: ProcessedPOI) -> LLMResolution:
         a_dict = _serialize_for_llm(a)
         b_dict = _serialize_for_llm(b)
         return await self.resolver.resolve(a_dict, b_dict)  # type: ignore[union-attr]
 
-    async def _make_master(
+    async def _build_master_fields(
         self,
         session: AsyncSession,
-        members: list[ProcessedPOI],
+        members: Sequence[ProcessedPOI],
         priority_by_source: dict[int, int],
-    ) -> None:
-        """Insert a master_poi from ``members`` and link them all to it."""
+    ) -> dict[str, Any]:
+        """Canonical values, centroid and source_refs for a set of members.
+
+        Shared by ``_make_master`` (INSERT) and ``_grow_master`` (UPDATE in
+        place) so the two cannot drift apart.
+        """
         # Override _source_id priority lookups before building.
         for r in members:
             sid = getattr(r, "_source_id", 0)
@@ -485,6 +659,33 @@ class MergeService:
             or canonical_name_row.district_code
         ward_code = _mode([m.ward_code for m in members]) \
             or canonical_name_row.ward_code
+
+        return {
+            "canonical": canonical,
+            "source_refs": source_refs,
+            "embedding": embedding,
+            "lat": lat,
+            "lng": lng,
+            "province_code": province_code,
+            "district_code": district_code,
+            "ward_code": ward_code,
+        }
+
+    async def _make_master(
+        self,
+        session: AsyncSession,
+        members: Sequence[ProcessedPOI],
+        priority_by_source: dict[int, int],
+    ) -> uuid.UUID:
+        """Insert a master_poi from ``members`` and link them all to it."""
+        fields = await self._build_master_fields(session, members, priority_by_source)
+        canonical = fields["canonical"]
+        source_refs = fields["source_refs"]
+        embedding = fields["embedding"]
+        lat, lng = fields["lat"], fields["lng"]
+        province_code = fields["province_code"]
+        district_code = fields["district_code"]
+        ward_code = fields["ward_code"]
 
         master_id_sql = text(
             """
@@ -587,6 +788,141 @@ class MergeService:
         logger.info(
             "merge: master=%s members=%d sources=%s name=%r",
             master_id, len(members), {r["source"] for r in source_refs}, canonical["canonical_name"],
+        )
+        return master_id  # type: ignore[no-any-return]
+
+
+    async def _grow_master(
+        self,
+        session: AsyncSession,
+        survivor_id: uuid.UUID,
+        members: Sequence[ProcessedPOI],
+        priority_by_source: dict[int, int],
+        losers: list[uuid.UUID],
+    ) -> None:
+        """Fold ``members`` and ``losers`` into ``survivor_id``, in place.
+
+        The survivor keeps its id. ``master_pois.id`` is what the Data Engine
+        stores as ``source.pois.external_id``, so minting a new master for a
+        re-merge would orphan every consumer row. Losers are marked
+        ``merged_away`` with ``merged_into`` pointing at the survivor — the
+        forwarding pointer the schema was designed for but nothing ever set.
+        """
+        import json as _json
+
+        fields = await self._build_master_fields(session, members, priority_by_source)
+        canonical = fields["canonical"]
+        proc_ids = [r.id for r in members]
+
+        await session.execute(
+            text(
+                """
+                UPDATE master_pois SET
+                    canonical_name = :name,
+                    canonical_name_embedding = CAST(:emb AS VECTOR(384)),
+                    canonical_address = :addr,
+                    canonical_address_components = CAST(:addr_comp AS JSONB),
+                    canonical_phone = :phone,
+                    canonical_website = :web,
+                    location = ST_GeogFromText(:wkt),
+                    openooh_category = :cat,
+                    openooh_subcategory = :subcat,
+                    brand = :brand,
+                    province_code = :prov,
+                    district_code = :dist,
+                    ward_code = :ward,
+                    source_refs = CAST(:srcrefs AS JSONB),
+                    merged_processed_ids = CAST(:procids AS BIGINT[]),
+                    confidence = :conf,
+                    quality_score = :q,
+                    version = version + 1,
+                    updated_at = NOW()
+                WHERE id = :mid
+                """
+            ),
+            {
+                "mid": survivor_id,
+                "name": canonical["canonical_name"],
+                "emb": "[" + ",".join(f"{float(x):.7f}" for x in fields["embedding"]) + "]",
+                "addr": canonical["canonical_address"],
+                "addr_comp": _json.dumps(canonical["canonical_address_components"])
+                if canonical["canonical_address_components"]
+                else None,
+                "phone": canonical["canonical_phone"],
+                "web": canonical["canonical_website"],
+                "wkt": f"SRID=4326;POINT({fields['lng']} {fields['lat']})",
+                "cat": canonical["openooh_category"],
+                "subcat": canonical["openooh_subcategory"],
+                "brand": canonical["brand"],
+                "prov": fields["province_code"],
+                "dist": fields["district_code"],
+                "ward": fields["ward_code"],
+                "srcrefs": _json.dumps(fields["source_refs"]),
+                "procids": proc_ids,
+                "conf": canonical["confidence"],
+                "q": canonical["quality_score"],
+            },
+        )
+
+        await session.execute(
+            text(
+                "UPDATE processed_pois SET merged_into = :mid, merge_status = 'merged' "
+                "WHERE id = ANY(:ids)"
+            ),
+            {"mid": survivor_id, "ids": proc_ids},
+        )
+
+        if losers:
+            await session.execute(
+                text(
+                    """
+                    UPDATE master_pois SET
+                        status = :status,
+                        merged_into = :mid,
+                        archived_reason = :reason,
+                        updated_at = NOW()
+                    WHERE id = ANY(CAST(:losers AS UUID[]))
+                    """
+                ),
+                {
+                    "status": MasterPOIStatus.MERGED_AWAY.value,
+                    "mid": survivor_id,
+                    "reason": f"remerged into {survivor_id}",
+                    "losers": [str(x) for x in losers],
+                },
+            )
+
+        await session.execute(
+            text(
+                """
+                INSERT INTO master_poi_history (
+                    master_poi_id, version, changed_fields,
+                    previous_values, new_values, change_reason, changed_at
+                )
+                SELECT :mid, version, CAST(:cf AS JSONB),
+                       CAST(:pv AS JSONB), CAST(:nv AS JSONB), :reason, NOW()
+                FROM master_pois WHERE id = :mid
+                """
+            ),
+            {
+                "mid": survivor_id,
+                "cf": _json.dumps(["merged_processed_ids", "source_refs"]),
+                "pv": _json.dumps({"merged_away": [str(x) for x in losers]}),
+                "nv": _json.dumps(
+                    {
+                        "canonical_name": canonical["canonical_name"],
+                        "processed_ids": proc_ids,
+                        "sources": [r["source"] for r in fields["source_refs"]],
+                    }
+                ),
+                "reason": "remerge",
+            },
+        )
+
+        MERGE_MEMBERS.inc(len(members))
+        logger.info(
+            "remerge: survivor=%s absorbed=%d members=%d name=%r",
+            survivor_id, len(losers), len(members), canonical["canonical_name"],
         )
 
 
