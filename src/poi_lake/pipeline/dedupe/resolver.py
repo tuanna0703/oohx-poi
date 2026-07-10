@@ -25,7 +25,11 @@ from poi_lake.observability.metrics import LLM_CALLS, LLM_TOKENS
 logger = logging.getLogger(__name__)
 
 
-_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+# 90 days, not 7. A verdict on a pair of POIs does not go stale — the records
+# are immutable once processed, and the cache key is (min_id, max_id). The
+# re-merge pass re-asks exactly the pairs the normal pass already paid for, and
+# a 7-day window meant most of those were re-billed.
+_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
 _CACHE_KEY_PREFIX = "poi-lake:dedupe:llm:"
 
 _PROMPT_SYSTEM = (

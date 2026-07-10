@@ -535,6 +535,13 @@ class MergeService:
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 a, b = rows[i], rows[j]
+                if find(a.id) == find(b.id):
+                    # Already the same component: an earlier pair merged them,
+                    # directly or through a chain. Union-find is transitive, so
+                    # asking the LLM "is A the same as C?" after settling A≡B and
+                    # B≡C buys nothing and costs a round-trip. Dense clusters —
+                    # the ones that dominate the bill — skip the most here.
+                    continue
                 score = self.scorer.score(a, b)
                 d = decide(score.composite)
                 DEDUPE_DECISIONS.labels(d.value).inc()
