@@ -22,12 +22,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime
 
 from sqlalchemy import text
 
 from poi_lake.config import get_settings
 from poi_lake.db import session_scope
 from poi_lake.pipeline.dedupe import LLMResolver, MergeService
+from poi_lake.pipeline.dedupe.llm_state import get_disabled
+
+
+def _parse_since(value: str) -> datetime:
+    """asyncpg binds timestamptz from a datetime, never from a string."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 async def _target_ids(session, since: str | None, limit: int | None) -> list[int]:
@@ -35,8 +42,8 @@ async def _target_ids(session, since: str | None, limit: int | None) -> list[int
     sql = "SELECT id FROM processed_pois WHERE merge_status = 'merged'"
     params: dict = {}
     if since:
-        sql += " AND updated_at >= CAST(:since AS timestamptz)"
-        params["since"] = since
+        sql += " AND updated_at >= :since"
+        params["since"] = _parse_since(since)
     sql += " ORDER BY id"
     if limit:
         sql += " LIMIT :lim"
@@ -68,6 +75,17 @@ async def main() -> None:
     args = ap.parse_args()
 
     settings = get_settings()
+
+    # The pairs worth re-merging are exactly the NEEDS_LLM ones. Running while
+    # the breaker is latched would either do nothing (--no-llm) or crash on the
+    # first pair; say so instead.
+    if not args.no_llm:
+        paused = await get_disabled()
+        if paused is not None:
+            print(f"dedupe is PAUSED since {paused.get('since')}: {paused.get('reason')}")
+            print("top up the Anthropic credit and press Resume in the admin UI first")
+            return
+
     async with session_scope() as session:
         ids = await _target_ids(session, args.since, args.row_limit)
         print(f"working set: {len(ids)} already-merged processed_pois")
