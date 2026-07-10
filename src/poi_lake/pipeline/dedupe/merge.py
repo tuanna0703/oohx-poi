@@ -22,15 +22,13 @@ import logging
 import time
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.db.models import (
-    MasterPOI,
-    MasterPOIHistory,
     MasterPOIStatus,
     MergeStatus,
     ProcessedPOI,
@@ -42,10 +40,28 @@ from poi_lake.observability.metrics import MERGE_MEMBERS
 from poi_lake.pipeline.dedupe.clusterer import SpatialClusterer
 from poi_lake.pipeline.dedupe.decision import DedupeDecision, decide
 from poi_lake.pipeline.dedupe.llm_state import LLMUnavailableError, is_fatal_llm_error
-from poi_lake.pipeline.dedupe.resolver import LLMResolver, LLMResolution
-from poi_lake.pipeline.dedupe.similarity import PairScore, PairSimilarityScorer
+from poi_lake.pipeline.dedupe.resolver import LLMResolution, LLMResolver
+from poi_lake.pipeline.dedupe.similarity import PairSimilarityScorer
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class LLMUsage:
+    """Resolver effort for one unit of work.
+
+    ``calls`` is what Anthropic bills; ``cached`` is what Redis answered for
+    free. Lumping them together makes a re-merge over already-judged pairs look
+    like a 200-call spend when it cost nothing, and hides a real spend behind a
+    warm cache — the two numbers move independently and must be read that way.
+    """
+
+    calls: int = 0
+    cached: int = 0
+    errors: int = 0
+
+    def as_stats(self) -> dict[str, int]:
+        return {"llm_calls": self.calls, "llm_cached": self.cached, "llm_errors": self.errors}
 
 
 # --- canonical-field helpers ------------------------------------------------
@@ -226,9 +242,11 @@ class MergeService:
         keeps a pass comfortably inside the time limit.
 
         Returns ``{clusters, masters_created, members_merged, llm_calls,
-        llm_errors, clusters_available}``. ``clusters_available`` is the total
-        this pass could see, so a caller can tell whether a backlog remains;
-        ``llm_errors`` is non-zero when the resolver was disabled mid-pass.
+        llm_cached, llm_errors, clusters_available}``. ``clusters_available`` is
+        the total this pass could see, so a caller can tell whether a backlog
+        remains; ``llm_calls`` counts billed API round-trips and ``llm_cached``
+        the pairs Redis already knew; ``llm_errors`` is non-zero when the
+        resolver was disabled mid-pass.
 
         ``max_seconds`` is the real safety belt. ``max_clusters`` bounds work in
         the wrong unit: 200 clusters take under a minute with the resolver off
@@ -250,8 +268,7 @@ class MergeService:
             "clusters": 0,
             "masters_created": 0,
             "members_merged": 0,
-            "llm_calls": 0,
-            "llm_errors": 0,
+            **LLMUsage().as_stats(),
             "clusters_available": len(groups),
         }
         if not groups:
@@ -288,6 +305,7 @@ class MergeService:
             stats["masters_created"] += sub["masters_created"]
             stats["members_merged"] += sub["members_merged"]
             stats["llm_calls"] += sub["llm_calls"]
+            stats["llm_cached"] += sub["llm_cached"]
             stats["llm_errors"] += sub["llm_errors"]
 
             # Durable progress. The sessionmaker sets expire_on_commit=False,
@@ -337,8 +355,7 @@ class MergeService:
             "clusters": 0,
             "masters_merged_away": 0,
             "members_moved": 0,
-            "llm_calls": 0,
-            "llm_errors": 0,
+            **LLMUsage().as_stats(),
             "clusters_available": len(groups),
         }
         if not groups:
@@ -384,14 +401,15 @@ class MergeService:
                 r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
 
             try:
-                components, calls, errs = await self._components_of(
+                components, usage = await self._components_of(
                     rows, None if max_seconds is None else started + max_seconds
                 )
             except LLMUnavailableError:
                 await session.commit()
                 raise
-            stats["llm_calls"] += calls
-            stats["llm_errors"] += errs
+            stats["llm_calls"] += usage.calls
+            stats["llm_cached"] += usage.cached
+            stats["llm_errors"] += usage.errors
 
             for members in components:
                 existing = [m.merged_into for m in members if m.merged_into is not None]
@@ -455,12 +473,7 @@ class MergeService:
             )
         ).scalars().all()
         if not rows:
-            return {
-                "masters_created": 0,
-                "members_merged": 0,
-                "llm_calls": 0,
-                "llm_errors": 0,
-            }
+            return {"masters_created": 0, "members_merged": 0, **LLMUsage().as_stats()}
 
         # Attach source_id to each row for the priority tie-breaker. Single
         # query against raw_pois.
@@ -480,14 +493,9 @@ class MergeService:
         # Singleton fast path.
         if len(rows) == 1:
             await self._make_master(session, rows, priority_by_source)
-            return {
-                "masters_created": 1,
-                "members_merged": 1,
-                "llm_calls": 0,
-                "llm_errors": 0,
-            }
+            return {"masters_created": 1, "members_merged": 1, **LLMUsage().as_stats()}
 
-        components, llm_calls, llm_errors = await self._components_of(rows, deadline)
+        components, usage = await self._components_of(rows, deadline)
 
         masters_created = 0
         members_merged = 0
@@ -499,17 +507,16 @@ class MergeService:
         return {
             "masters_created": masters_created,
             "members_merged": members_merged,
-            "llm_calls": llm_calls,
-            "llm_errors": llm_errors,
+            **usage.as_stats(),
         }
 
     async def _components_of(
         self, rows: Sequence[ProcessedPOI], deadline: float | None = None
-    ) -> tuple[list[list[ProcessedPOI]], int, int]:
+    ) -> tuple[list[list[ProcessedPOI]], LLMUsage]:
         """Score every pair, union the confirmed-same ones, return components.
 
         Shared by the pending pass and the re-merge pass so both agree on what
-        "the same place" means. Returns ``(components, llm_calls, llm_errors)``.
+        "the same place" means. Returns ``(components, usage)``.
 
         ``deadline`` (a ``time.monotonic()`` value) stops resolving further
         pairs once the pass has spent its budget. A per-cluster check is not
@@ -530,8 +537,7 @@ class MergeService:
             if ra != rb:
                 parent[ra] = rb
 
-        llm_calls = 0
-        llm_errors = 0
+        usage = LLMUsage()
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 a, b = rows[i], rows[j]
@@ -555,13 +561,15 @@ class MergeService:
                         self._llm_disabled_reason = "pass budget spent"
                         logger.info("dedupe: LLM budget spent mid-cluster")
                         continue
-                    llm_calls += 1
                     try:
                         resolved = await self._resolve_pair(a, b)
                     except Exception as exc:
                         # dramatiq's TimeLimitExceeded derives from BaseException,
                         # so `except Exception` cannot swallow the actor deadline.
-                        llm_errors += 1
+                        # The resolver only raises out of _call_llm, so a failure
+                        # is always a real round-trip, never a cache read.
+                        usage.calls += 1
+                        usage.errors += 1
                         if is_fatal_llm_error(exc):
                             # Out of credit, or a dead key. Abort the pass rather
                             # than merging NEEDS_LLM pairs into separate masters:
@@ -577,13 +585,20 @@ class MergeService:
                             self._llm_disabled_reason,
                         )
                     else:
+                        # Billed calls and Redis hits are not interchangeable:
+                        # a re-merge over already-judged pairs reports hundreds
+                        # of "calls" and costs nothing. Keep them apart.
+                        if resolved.cached:
+                            usage.cached += 1
+                        else:
+                            usage.calls += 1
                         if resolved.same and resolved.confidence >= 0.6:
                             union(a.id, b.id)
 
         grouped: dict[int, list[ProcessedPOI]] = {}
         for r in rows:
             grouped.setdefault(find(r.id), []).append(r)
-        return list(grouped.values()), llm_calls, llm_errors
+        return list(grouped.values()), usage
 
     async def _resolve_pair(self, a: ProcessedPOI, b: ProcessedPOI) -> LLMResolution:
         a_dict = _serialize_for_llm(a)

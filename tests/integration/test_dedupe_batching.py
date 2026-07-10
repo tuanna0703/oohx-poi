@@ -329,10 +329,10 @@ async def test_deadline_stops_llm_calls_inside_a_cluster(
         rows = list((await s.execute(select(ProcessedPOI).limit(2))).scalars().all())
 
     # Deadline already in the past.
-    components, calls, errors = await svc._components_of(rows, deadline=0.0)
+    components, usage = await svc._components_of(rows, deadline=0.0)
 
     assert resolver.calls == 0, "no LLM call may be made after the deadline"
-    assert calls == 0
+    assert usage.calls == 0
     assert len(components) == 2, "unresolved pairs stay separate, to retry next pass"
 
 

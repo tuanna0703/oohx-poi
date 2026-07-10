@@ -17,13 +17,14 @@ from poi_lake.pipeline.dedupe.merge import MergeService
 
 
 class _CountingResolver:
-    def __init__(self, same: bool = True) -> None:
+    def __init__(self, same: bool = True, cached: bool = False) -> None:
         self.calls: list[tuple[int, int]] = []
         self.same = same
+        self.cached = cached
 
     async def resolve(self, a: dict, b: dict) -> object:
         self.calls.append((a["id"], b["id"]))
-        return SimpleNamespace(same=self.same, confidence=0.9, reason="test")
+        return SimpleNamespace(same=self.same, confidence=0.9, reason="test", cached=self.cached)
 
 
 def _rows(n: int) -> list[SimpleNamespace]:
@@ -60,13 +61,13 @@ async def test_four_identical_rows_cost_three_calls_not_six() -> None:
     resolver = _CountingResolver(same=True)
     svc = MergeService(resolver=resolver)  # type: ignore[arg-type]
 
-    components, llm_calls, llm_errors = await svc._components_of(_rows(4))
+    components, usage = await svc._components_of(_rows(4))
 
     assert len(components) == 1, "all four rows are the same place"
     assert len(components[0]) == 4
-    assert llm_errors == 0
+    assert usage.errors == 0
     # Without the skip this is 6 — every i<j pair.
-    assert llm_calls == 3, f"expected 3 verdicts, made {resolver.calls}"
+    assert usage.calls == 3, f"expected 3 verdicts, made {resolver.calls}"
 
 
 async def test_distinct_rows_still_compare_every_pair() -> None:
@@ -74,7 +75,23 @@ async def test_distinct_rows_still_compare_every_pair() -> None:
     resolver = _CountingResolver(same=False)
     svc = MergeService(resolver=resolver)  # type: ignore[arg-type]
 
-    components, llm_calls, _ = await svc._components_of(_rows(4))
+    components, usage = await svc._components_of(_rows(4))
 
     assert len(components) == 4, "nothing merged"
-    assert llm_calls == 6, "all 4C2 pairs must still be judged"
+    assert usage.calls == 6, "all 4C2 pairs must still be judged"
+
+
+async def test_cache_hits_are_not_counted_as_billed_calls() -> None:
+    """A warm cache must report llm_cached, never llm_calls.
+
+    Re-merge re-asks pairs the normal pass already paid for. Counting those
+    Redis reads as calls made a 5-second run look like a 141-call spend.
+    """
+    resolver = _CountingResolver(same=False, cached=True)
+    svc = MergeService(resolver=resolver)  # type: ignore[arg-type]
+
+    _, usage = await svc._components_of(_rows(4))
+
+    assert usage.cached == 6, "every verdict came from Redis"
+    assert usage.calls == 0, "nothing was billed"
+    assert usage.as_stats() == {"llm_calls": 0, "llm_cached": 6, "llm_errors": 0}
