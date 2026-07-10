@@ -443,6 +443,148 @@ class MergeService:
         await session.commit()
         return stats
 
+    async def split_master(
+        self,
+        session: AsyncSession,
+        master_id: uuid.UUID,
+        *,
+        eps_meters: float | None = None,
+    ) -> dict[str, Any]:
+        """Undo an over-merge: re-cluster a master's members and split them.
+
+        Before the AUTO_MERGE distance gate existed, a chain brand could pull
+        two genuinely different branches into one master — every non-geometric
+        field matches across branches, and DBSCAN chains. Nine Sacombank ATM
+        masters were folded onto one survivor spanning 217 m.
+
+        The repair is recoverable because a loser keeps its ``source_refs`` when
+        it is marked ``merged_away``, so each raw_poi is still attributable to
+        the master that used to own it. The survivor's own refs are whatever no
+        loser claims.
+
+        Each spatial group keeps one master. The group holding the survivor's
+        original raw_poi keeps the survivor's id — the Data Engine stores it as
+        ``source.pois.external_id``, so it must not move. Every other group
+        resurrects one of its own losers rather than minting a new id, since
+        that id is one the Data Engine has already seen.
+
+        Caller owns the transaction: commit to keep, roll back for a dry run.
+        """
+        eps = eps_meters if eps_meters is not None else get_settings().dedupe_cluster_eps_meters
+
+        status = (
+            await session.execute(
+                text("SELECT status FROM master_pois WHERE id = :mid"), {"mid": master_id}
+            )
+        ).scalar_one_or_none()
+        if status is None:
+            raise ValueError(f"no such master: {master_id}")
+        if status != MasterPOIStatus.ACTIVE.value:
+            raise ValueError(f"master {master_id} is {status}, not active")
+
+        members = list(
+            (
+                await session.execute(
+                    select(ProcessedPOI).where(ProcessedPOI.merged_into == master_id)
+                )
+            ).scalars().all()
+        )
+        if len(members) < 2:
+            return {"groups": 1, "changed": False, "masters": [str(master_id)]}
+
+        clusterer = SpatialClusterer()
+        cmap = await clusterer.cluster(
+            session, eps_meters=eps, only_pending=False, ids=[m.id for m in members]
+        )
+        groups = list(clusterer.group(cmap).values())
+        if len(groups) < 2:
+            return {"groups": 1, "changed": False, "masters": [str(master_id)]}
+
+        by_id = {m.id: m for m in members}
+        raw_to_source = {
+            rid: sid
+            for rid, sid in (
+                await session.execute(
+                    select(RawPOI.id, RawPOI.source_id).where(
+                        RawPOI.id.in_({m.raw_poi_id for m in members})
+                    )
+                )
+            ).all()
+        }
+        for m in members:
+            m._source_id = raw_to_source.get(m.raw_poi_id)  # type: ignore[attr-defined]
+        priority_by_source = {
+            sid: pri for sid, pri in (await session.execute(select(Source.id, Source.priority))).all()
+        }
+
+        loser_raw = {
+            lid: {ref["raw_poi_id"] for ref in (refs or []) if "raw_poi_id" in ref}
+            for lid, refs in (
+                await session.execute(
+                    text(
+                        "SELECT id, source_refs FROM master_pois "
+                        "WHERE merged_into = :mid AND status = :st"
+                    ),
+                    {"mid": master_id, "st": MasterPOIStatus.MERGED_AWAY.value},
+                )
+            ).all()
+        }
+        survivor_refs = {
+            ref["raw_poi_id"]
+            for ref in (
+                await session.execute(
+                    text("SELECT source_refs FROM master_pois WHERE id = :mid"),
+                    {"mid": master_id},
+                )
+            ).scalar_one()
+            or []
+            if "raw_poi_id" in ref
+        }
+        claimed = set().union(*loser_raw.values()) if loser_raw else set()
+        survivor_own = survivor_refs - claimed
+
+        # Exactly one group keeps the survivor's id, even if its original refs
+        # straddle the split: whichever group holds most of them. Handing the id
+        # to two groups would make the second _grow_master overwrite the first.
+        raw_of = [{by_id[i].raw_poi_id for i in ids} for ids in groups]
+        survivor_group = max(
+            range(len(groups)), key=lambda g: (len(raw_of[g] & survivor_own), len(groups[g]))
+        )
+
+        kept: list[str] = []
+        for g, member_ids in enumerate(groups):
+            group = [by_id[i] for i in member_ids]
+            candidates = [lid for lid, raws in loser_raw.items() if raws & raw_of[g]]
+
+            if g == survivor_group:
+                keeper = master_id
+            elif candidates:
+                keeper = await self._pick_survivor(session, set(candidates))
+                await session.execute(
+                    text(
+                        "UPDATE master_pois SET status = :st, merged_into = NULL, "
+                        "archived_reason = NULL, updated_at = NOW() WHERE id = :mid"
+                    ),
+                    {"st": MasterPOIStatus.ACTIVE.value, "mid": keeper},
+                )
+                logger.info("split: resurrected master %s", keeper)
+            else:
+                # No loser owns this group's raw_pois, so there is no id to give
+                # it back. Minting one here would hand the Data Engine an
+                # external_id it has never seen; refuse rather than guess.
+                raise ValueError(
+                    f"split {master_id}: group {sorted(member_ids)} has no former master"
+                )
+
+            group_losers = [lid for lid in candidates if lid != keeper]
+            await self._grow_master(session, keeper, group, priority_by_source, group_losers)
+            kept.append(str(keeper))
+
+        logger.info(
+            "split: master=%s -> %d masters (%s)", master_id, len(kept), ", ".join(kept)
+        )
+        return {"groups": len(groups), "changed": True, "masters": kept}
+
     async def _pick_survivor(
         self, session: AsyncSession, master_ids: set[uuid.UUID]
     ) -> uuid.UUID:
