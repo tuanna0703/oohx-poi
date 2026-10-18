@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 JobType = Literal["area_sweep", "category_search", "detail_enrich", "backfill"]
 
 
@@ -19,7 +18,7 @@ class CreateIngestionJob(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_params(self) -> "CreateIngestionJob":
+    def _validate_params(self) -> CreateIngestionJob:
         if self.job_type in ("area_sweep", "category_search"):
             for key in ("lat", "lng", "radius_m"):
                 if key not in self.params:

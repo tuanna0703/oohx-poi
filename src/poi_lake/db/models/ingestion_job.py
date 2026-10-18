@@ -48,7 +48,7 @@ class IngestionJob(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    source: Mapped["Source"] = relationship(lazy="joined")  # type: ignore[name-defined]  # noqa: F821
+    source: Mapped[Source] = relationship(lazy="joined")  # type: ignore[name-defined]  # noqa: F821
 
     def __repr__(self) -> str:
         return f"<IngestionJob id={self.id} type={self.job_type} status={self.status}>"

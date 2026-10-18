@@ -12,12 +12,11 @@ Sections:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 import streamlit as st
-
 from admin.lib.api import APIError, get_json, post_json
 
 st.set_page_config(page_title="Crawl Coverage — POI Lake", layout="wide")
@@ -58,7 +57,7 @@ def _humanize_dt(dt_str: str | None) -> str:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
     except ValueError:
         return dt_str
-    delta = datetime.now(timezone.utc) - dt
+    delta = datetime.now(UTC) - dt
     secs = int(delta.total_seconds())
     if secs < 60:
         return f"{secs}s ago"

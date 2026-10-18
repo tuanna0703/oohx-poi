@@ -42,7 +42,7 @@ with st.spinner("Checking stack health..."):
         col_b.metric("postgis", "ok" if "postgis" in extensions else "MISSING")
         col_c.metric("pgvector", "ok" if "vector" in extensions else "MISSING")
         col_d.metric("pgcrypto", "ok" if "pgcrypto" in extensions else "MISSING")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         st.error(f"DB unreachable: {exc}")
 
 # ---- top-level KPIs -------------------------------------------------------
@@ -59,7 +59,7 @@ try:
     cols[3].metric("Jobs in flight", f"{k['jobs_inflight']:,}",
                    delta=f"{k['jobs_failed']:,} failed",
                    delta_color="inverse")
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     st.error(f"KPI query failed: {exc}")
 
 st.divider()

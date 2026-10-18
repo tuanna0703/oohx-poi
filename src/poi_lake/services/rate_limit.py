@@ -62,7 +62,7 @@ async def enforce_rate_limit(
             pipe.incr(key)
             pipe.expire(key, 65)  # a bit longer than the window
             count, _ = await pipe.execute()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("rate_limit: redis unavailable, fail-open: %s", exc)
         return client
 

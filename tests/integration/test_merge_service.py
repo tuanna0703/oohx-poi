@@ -18,7 +18,7 @@ from poi_lake.db.models import (
 )
 from poi_lake.pipeline.dedupe import MergeService
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 async def _insert_processed(

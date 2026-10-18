@@ -15,7 +15,6 @@ Reference taxonomy: https://github.com/openooh/venue-taxonomy
 
 from __future__ import annotations
 
-
 # Each value is a tuple so callers can rely on stable iteration order
 # (we hand it to gosom verbatim — first keyword shows up first in the UI).
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -314,6 +313,4 @@ def is_openooh_code(value: str | None) -> bool:
     v = value.strip().lower()
     if v in _KEYWORDS:
         return True
-    if "." in v and v.split(".", 1)[0] in _KEYWORDS:
-        return True
-    return False
+    return bool("." in v and v.split(".", 1)[0] in _KEYWORDS)

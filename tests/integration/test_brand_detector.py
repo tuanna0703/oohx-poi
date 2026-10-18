@@ -7,7 +7,7 @@ import pytest
 from poi_lake.db import get_sessionmaker
 from poi_lake.pipeline.normalize import BrandDetector
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 async def test_detects_seeded_brands() -> None:

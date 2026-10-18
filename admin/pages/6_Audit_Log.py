@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import streamlit as st
-
 from admin.lib.queries import audit_log
 
 st.set_page_config(page_title="Audit Log — POI Lake", layout="wide")

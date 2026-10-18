@@ -21,9 +21,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session
-from poi_lake.services.rate_limit import (
-    require_permission_with_rate_limit as require_permission,
-)
 from poi_lake.db.models import MasterPOI, MasterPOIHistory
 from poi_lake.schemas import (
     BrandSummary,
@@ -32,6 +29,9 @@ from poi_lake.schemas import (
     MasterPOIOut,
     SearchRequest,
     SourceRefOut,
+)
+from poi_lake.services.rate_limit import (
+    require_permission_with_rate_limit as require_permission,
 )
 
 logger = logging.getLogger(__name__)

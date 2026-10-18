@@ -10,10 +10,10 @@ returned.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import pandas as pd
 import streamlit as st
-
 from admin.lib.api import APIError, get_json
 from admin.lib.queries import per_source_stats
 
@@ -32,7 +32,7 @@ with st.sidebar:
     st.header("Filters")
 
     sources_df = per_source_stats()
-    source_options = ["(any)"] + sources_df["code"].tolist()
+    source_options = ["(any)", *sources_df["code"].tolist()]
     source_choice = st.selectbox("Source", options=source_options)
     source_code = None if source_choice == "(any)" else source_choice
 
@@ -87,9 +87,9 @@ with st.sidebar:
     )
     fetched_since_param: str | None = None
     if recency_hours > 0:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
         fetched_since_param = (
-            datetime.now(timezone.utc) - timedelta(hours=recency_hours)
+            datetime.now(UTC) - timedelta(hours=recency_hours)
         ).isoformat()
 
     per_page = st.slider("Rows per page", 10, 500, 50, step=10)
@@ -120,7 +120,7 @@ try:
 except APIError as exc:
     st.error(f"Fetch failed: {exc}")
     st.stop()
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     st.error(f"Fetch failed: {exc}")
     st.stop()
 

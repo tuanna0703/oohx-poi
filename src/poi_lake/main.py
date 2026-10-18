@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(env=settings.app_env, level=settings.app_log_level)
     logger.info("poi-lake starting", env=settings.app_env, version=__version__)

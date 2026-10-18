@@ -12,7 +12,7 @@ Steps per record:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,7 +24,6 @@ from poi_lake.db.models import ProcessedPOI, RawPOI, Source
 from poi_lake.observability import NORMALIZE_PROCESSED_INSERTED
 from poi_lake.observability.metrics import NORMALIZE_SKIPPED
 from poi_lake.pipeline.embed import EmbeddingService, get_embedding_service
-from poi_lake.services.admin_geo import lookup_admin
 from poi_lake.pipeline.extractors import get_extractor
 from poi_lake.pipeline.normalize import (
     AddressNormalizer,
@@ -33,6 +32,7 @@ from poi_lake.pipeline.normalize import (
     PhoneNormalizer,
 )
 from poi_lake.pipeline.quality import QualityScorer
+from poi_lake.services.admin_geo import lookup_admin
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,7 @@ class NormalizePipeline:
 
     @staticmethod
     async def _mark_processed(session: AsyncSession, raw: RawPOI) -> None:
-        raw.processed_at = datetime.now(timezone.utc)
+        raw.processed_at = datetime.now(UTC)
 
     @staticmethod
     def _extract_domain(url: str | None) -> str | None:

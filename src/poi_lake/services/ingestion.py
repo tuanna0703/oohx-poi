@@ -12,10 +12,9 @@ Job types supported in Phase 2:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,7 +86,7 @@ class IngestionService:
         except AdapterError as exc:
             await self._fail(job, str(exc), stats)
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             await self._fail(job, f"unexpected: {exc!r}", stats)
             raise
 
@@ -179,7 +178,7 @@ class IngestionService:
             from poi_lake.workers.normalize import run_normalize_raw_poi
 
             run_normalize_raw_poi.send(raw_poi_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(
                 "could not enqueue normalize for raw_poi %d: %s — will be picked up by backfill",
                 raw_poi_id, exc,
@@ -189,14 +188,14 @@ class IngestionService:
 
     async def _mark_running(self, job: IngestionJob) -> None:
         job.status = IngestionJobStatus.RUNNING.value
-        job.started_at = datetime.now(timezone.utc)
+        job.started_at = datetime.now(UTC)
         await self.session.commit()
 
     async def _mark_completed(self, job: IngestionJob, stats: dict[str, int]) -> None:
         # Surface raw count so the crawl velocity endpoint can sum it.
         stats = {**stats, "raw_count": stats.get("new", 0)}
         job.status = IngestionJobStatus.COMPLETED.value
-        job.completed_at = datetime.now(timezone.utc)
+        job.completed_at = datetime.now(UTC)
         job.stats = stats
         await self.session.commit()
         await self._update_crawl_plan(job, success=True, raw_count=stats["raw_count"])
@@ -213,7 +212,7 @@ class IngestionService:
         if fresh is None:
             return
         fresh.status = IngestionJobStatus.FAILED.value
-        fresh.completed_at = datetime.now(timezone.utc)
+        fresh.completed_at = datetime.now(UTC)
         fresh.error_message = reason[:2000]
         fresh.stats = stats or {}
         await self.session.commit()

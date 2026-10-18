@@ -3,8 +3,8 @@
 from poi_lake.observability.logging import configure_logging, get_logger
 from poi_lake.observability.metrics import (
     DEDUPE_DECISIONS,
-    HTTP_REQUESTS,
     HTTP_REQUEST_DURATION,
+    HTTP_REQUESTS,
     INGEST_RAW_INSERTED,
     MERGE_MASTERS_CREATED,
     NORMALIZE_PROCESSED_INSERTED,

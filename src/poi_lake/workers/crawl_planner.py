@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 import dramatiq
@@ -290,7 +289,7 @@ async def _recompute_pois_master(session) -> None:  # type: ignore[no-untyped-de
             )
         )
         await session.commit()
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("recompute pois_master failed (non-fatal)")
         await session.rollback()
 

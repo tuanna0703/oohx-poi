@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from poi_lake.db.base import Base
 
 
-class CrawlPlanStatus(str, Enum):
+class CrawlPlanStatus(str, Enum):  # noqa: UP042 - StrEnum changes str(member)
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     DONE = "done"

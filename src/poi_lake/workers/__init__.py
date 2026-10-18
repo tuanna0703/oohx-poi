@@ -18,7 +18,14 @@ import time
 
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
-from dramatiq.middleware import AgeLimit, Callbacks, Pipelines, Retries, ShutdownNotifications, TimeLimit
+from dramatiq.middleware import (
+    AgeLimit,
+    Callbacks,
+    Pipelines,
+    Retries,
+    ShutdownNotifications,
+    TimeLimit,
+)
 
 from poi_lake.config import get_settings
 from poi_lake.observability import configure_logging
@@ -47,10 +54,12 @@ def _configure_broker() -> RedisBroker:
 broker = _configure_broker()
 
 # Importing the actor modules registers actors against the broker.
-from poi_lake.workers import crawl_planner  # noqa: E402, F401
-from poi_lake.workers import dedupe  # noqa: E402, F401
-from poi_lake.workers import ingest  # noqa: E402, F401  (side-effect import)
-from poi_lake.workers import normalize  # noqa: E402, F401
+from poi_lake.workers import (  # noqa: E402 - must follow broker setup
+    crawl_planner,  # noqa: F401
+    dedupe,  # noqa: F401
+    ingest,  # noqa: F401  (side-effect import)
+    normalize,  # noqa: F401
+)
 
 
 def _start_dedupe_scheduler() -> None:
@@ -80,7 +89,7 @@ def _start_dedupe_scheduler() -> None:
                 from poi_lake.workers.dedupe import run_dedupe
                 run_dedupe.send()
                 logger.info("scheduled dedupe tick enqueued (window=%d)", window)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("dedupe scheduler tick failed")
         finally:
             t = threading.Timer(interval_s, _tick)
@@ -120,7 +129,7 @@ def _start_crawl_planner_scheduler() -> None:
                 from poi_lake.workers.crawl_planner import run_crawl_planner
                 run_crawl_planner.send()
                 logger.info("scheduled crawl-planner tick enqueued (window=%d)", window)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("crawl planner scheduler tick failed")
         finally:
             t = threading.Timer(interval_s, _tick)

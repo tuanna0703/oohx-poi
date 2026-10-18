@@ -23,6 +23,7 @@ For full-area sweeps the orchestrator should tile and submit many jobs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import hashlib
 import io
@@ -324,10 +325,8 @@ class GosomScraperAdapter(SourceAdapter):
         return RawPOIRecord(source_poi_id=spid, raw_payload=payload, location=location)
 
     async def _delete_job_quiet(self, job_id: str) -> None:
-        try:
+        with contextlib.suppress(httpx.HTTPError):  # best-effort cleanup
             await self._client.delete(f"/api/v1/jobs/{job_id}")
-        except httpx.HTTPError:
-            pass  # best-effort cleanup
 
     async def _wait_for_quota(self) -> None:
         async with self._rate_lock:

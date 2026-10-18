@@ -19,7 +19,6 @@ from typing import Any
 
 from rapidfuzz import fuzz
 
-
 _W_NAME = 0.40
 _W_ADDR = 0.25
 _W_PHONE = 0.15
@@ -84,7 +83,7 @@ class PairSimilarityScorer:
             return 0.5
         if len(a) != len(b):
             return 0.5
-        return max(0.0, min(1.0, sum(x * y for x, y in zip(a, b))))
+        return max(0.0, min(1.0, sum(x * y for x, y in zip(a, b, strict=False))))
 
     @staticmethod
     def _addr_similarity(a: str | None, b: str | None) -> float:

@@ -12,7 +12,6 @@ Two views:
 from __future__ import annotations
 
 import streamlit as st
-
 from admin.lib.queries import (
     admin_districts,
     admin_provinces,
@@ -52,7 +51,7 @@ district_code = (
 
 cats = categories_with_counts()
 cat_choice = c3.selectbox(
-    "Category", options=["(any)"] + cats["category"].astype(str).tolist()
+    "Category", options=["(any)", *cats["category"].astype(str).tolist()]
 )
 min_conf = c4.slider("Min conf", 0.0, 1.0, 0.0, step=0.05)
 if c5.button("Refresh"):

@@ -12,7 +12,7 @@ from poi_lake.db.models import ProcessedPOI, RawPOI
 from poi_lake.pipeline.embed import EmbeddingService, set_embedding_service
 from poi_lake.pipeline.orchestrator import NormalizePipeline
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 class _FakeEmbeddings(EmbeddingService):

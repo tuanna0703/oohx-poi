@@ -15,7 +15,7 @@ from poi_lake.db import get_sessionmaker
 from poi_lake.db.models import ProcessedPOI, RawPOI, Source
 from poi_lake.pipeline.dedupe import SpatialClusterer
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 async def _make_processed(

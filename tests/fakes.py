@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 from typing import ClassVar
 
 from poi_lake.adapters.base import (
-    AdapterConfig,
     AdapterTransientError,
     RawPOIRecord,
     SourceAdapter,

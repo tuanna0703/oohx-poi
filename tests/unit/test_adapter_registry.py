@@ -25,7 +25,7 @@ def test_resolves_osm_overpass() -> None:
 
 
 def test_rejects_bad_format() -> None:
-    with pytest.raises(ValueError, match="module.path:ClassName"):
+    with pytest.raises(ValueError, match=r"module\.path:ClassName"):
         load_adapter_class("poi_lake.adapters.google_places.GooglePlacesAdapter")
 
 

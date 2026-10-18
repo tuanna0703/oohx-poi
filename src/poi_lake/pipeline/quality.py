@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 @dataclass(slots=True, frozen=True)
@@ -87,6 +87,6 @@ class QualityScorer:
     def _freshness(fetched_at: datetime) -> float:
         """Exponential decay with half-life ``_FRESHNESS_HALF_LIFE_DAYS``."""
         if fetched_at.tzinfo is None:
-            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-        age_days = max(0.0, (datetime.now(timezone.utc) - fetched_at).total_seconds() / 86400.0)
+            fetched_at = fetched_at.replace(tzinfo=UTC)
+        age_days = max(0.0, (datetime.now(UTC) - fetched_at).total_seconds() / 86400.0)
         return math.pow(0.5, age_days / _FRESHNESS_HALF_LIFE_DAYS)

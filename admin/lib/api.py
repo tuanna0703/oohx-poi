@@ -54,7 +54,7 @@ def _raise_for_status(r: httpx.Response) -> None:
         detail = body.get("detail") if isinstance(body, dict) else str(body)
         if not isinstance(detail, str):
             detail = str(detail)
-    except Exception:  # noqa: BLE001
+    except Exception:
         detail = (r.text or "").strip() or r.reason_phrase
     raise APIError(r.status_code, detail, str(r.request.url))
 

@@ -21,8 +21,6 @@ import json
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import text
-
 from admin.lib.api import post_json
 from admin.lib.db import session as db_session
 from admin.lib.queries import (
@@ -30,6 +28,8 @@ from admin.lib.queries import (
     per_source_stats,
     recent_jobs,
 )
+from sqlalchemy import text
+
 from poi_lake.pipeline.normalize.openooh_keywords import (
     is_openooh_code,
     keywords_for_openooh,
@@ -332,7 +332,7 @@ with st.expander("Trigger a new job", expanded=True):
                     f"{src_n} sources = {estimated_total} jobs** "
                     f"(cell radius ~{int(cell_size_m)//2}m)"
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     cap_default = max(300, (estimated_total or 0) + 50)
@@ -404,7 +404,7 @@ with st.expander("Trigger a new job", expanded=True):
                     f"radius {resp['cell_radius_m']}m"
                 )
             st.cache_data.clear()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             st.error(f"Submit failed: {exc}")
 
 # ---- Recent jobs filter ---------------------------------------------------

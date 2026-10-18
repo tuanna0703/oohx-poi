@@ -14,9 +14,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -249,7 +249,7 @@ async def status_kpis(session: AsyncSession = Depends(get_session)) -> StatusKPI
     if completed_24h > 0 and pending_remaining > 0:
         # Plan rows / day → days to finish.
         days = pending_remaining / completed_24h
-        eta = datetime.now(timezone.utc) + timedelta(days=days)
+        eta = datetime.now(UTC) + timedelta(days=days)
 
     _ = settings  # silence linter (settings reserved for future tuning)
     return StatusKPIs(

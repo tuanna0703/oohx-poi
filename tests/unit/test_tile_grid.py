@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from poi_lake.api.v1.admin import _grid_centers

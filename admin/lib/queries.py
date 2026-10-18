@@ -6,7 +6,7 @@ within a few seconds without overloading the DB on every interaction.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -286,7 +286,7 @@ def audit_log(
 ) -> pd.DataFrame:
     clauses = ["changed_at >= :since"]
     params: dict[str, Any] = {
-        "since": datetime.now(timezone.utc) - timedelta(days=days),
+        "since": datetime.now(UTC) - timedelta(days=days),
         "lim": limit,
     }
     if master_poi_id:

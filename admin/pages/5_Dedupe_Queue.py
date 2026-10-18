@@ -12,7 +12,6 @@ cluster the operator can:
 from __future__ import annotations
 
 import streamlit as st
-
 from admin.lib.api import post_json
 from admin.lib.llm import breaker_banner
 from admin.lib.queries import pending_clusters
@@ -86,7 +85,7 @@ for cid in cluster_ids:
                         st.warning(f"{resp.get('status')}: {resp.get('reason')}")
                     st.cache_data.clear()
                     st.rerun()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     st.error(f"Merge failed: {exc}")
 
         if col_b.button("Reject selected", key=f"reject-{cid}"):
@@ -104,5 +103,5 @@ for cid in cluster_ids:
                     st.success(f"Rejected {resp.get('rows_updated', 0)} record(s).")
                     st.cache_data.clear()
                     st.rerun()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     st.error(f"Reject failed: {exc}")

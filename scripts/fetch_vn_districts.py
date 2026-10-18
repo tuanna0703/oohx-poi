@@ -27,15 +27,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sys
 import time
 from typing import Any
 
 import httpx
+from sqlalchemy import text
 
 from poi_lake.db import session_scope
-from sqlalchemy import text
 
 PROVINCES_API = "https://provinces.open-api.vn/api/v1/p/{code}?depth=2"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"

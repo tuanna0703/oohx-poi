@@ -11,7 +11,6 @@ import hashlib
 import secrets
 from dataclasses import dataclass
 
-
 _KEY_PREFIX = "pl_"     # makes leaked keys easy to grep for
 _KEY_BYTES = 32         # ~256 bits of entropy after URL-safe encoding
 

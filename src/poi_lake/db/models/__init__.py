@@ -13,8 +13,8 @@ from poi_lake.db.models.raw_poi import RawPOI
 from poi_lake.db.models.source import Source
 
 __all__ = [
-    "AdminUnit",
     "APIClient",
+    "AdminUnit",
     "Brand",
     "CrawlPlan",
     "CrawlPlanStatus",

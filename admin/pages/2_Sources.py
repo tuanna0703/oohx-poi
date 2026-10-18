@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 
 import streamlit as st
-from sqlalchemy import select, text, update
-
 from admin.lib.db import session as db_session
+from sqlalchemy import select, update
+
 from poi_lake.db.models import Source
 
 st.set_page_config(page_title="Sources — POI Lake", layout="wide")
@@ -58,18 +58,17 @@ with right:
     st.caption(f"adapter: `{selected['adapter_class']}`")
 
     new_enabled = st.toggle("Enabled", value=selected["enabled"])
-    if new_enabled != selected["enabled"]:
-        if st.button("Save", type="primary"):
-            with db_session() as s:
-                s.execute(
-                    update(Source)
-                    .where(Source.id == selected["id"])
-                    .values(enabled=new_enabled)
-                )
-                s.commit()
-            st.success(f"{selected['code']} → enabled={new_enabled}")
-            st.cache_data.clear()
-            st.rerun()
+    if new_enabled != selected["enabled"] and st.button("Save", type="primary"):
+        with db_session() as s:
+            s.execute(
+                update(Source)
+                .where(Source.id == selected["id"])
+                .values(enabled=new_enabled)
+            )
+            s.commit()
+        st.success(f"{selected['code']} → enabled={new_enabled}")
+        st.cache_data.clear()
+        st.rerun()
 
     st.write(f"**Priority:** {selected['priority']}  "
              f"(lower number = wins canonical-value tie-breaks)")

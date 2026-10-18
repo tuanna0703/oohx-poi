@@ -10,8 +10,7 @@ Phase 2 surface:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 from datetime import datetime as _dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -460,7 +459,7 @@ async def list_raw_pois(
                 raise ValueError
             lng_min, lat_min, lng_max, lat_max = parts
         except ValueError:
-            raise HTTPException(400, "bbox must be 'lng_min,lat_min,lng_max,lat_max'")
+            raise HTTPException(400, "bbox must be 'lng_min,lat_min,lng_max,lat_max'") from None
         clauses.append(
             "ST_Within(r.location::geometry, "
             "ST_MakeEnvelope(:bb_lng_min, :bb_lat_min, :bb_lng_max, :bb_lat_max, 4326))"
@@ -746,5 +745,5 @@ def _to_out(job: IngestionJob, source_code: str) -> IngestionJobOut:
         started_at=job.started_at,
         completed_at=job.completed_at,
         error_message=job.error_message,
-        created_at=job.created_at or datetime.now(timezone.utc),
+        created_at=job.created_at or datetime.now(UTC),
     )

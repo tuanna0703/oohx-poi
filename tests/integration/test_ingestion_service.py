@@ -25,9 +25,7 @@ async def _run_service(job_id: int) -> dict[str, int]:
         svc = IngestionService(svc_session)
         return await svc.run_job(job_id)
 
-# Pin every test in this module to the session-scoped event loop so they
-# share the same engine/connection pool as the db_session fixture.
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 def _records_payload(records: list[dict]) -> dict:

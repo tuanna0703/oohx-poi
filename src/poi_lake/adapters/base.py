@@ -64,13 +64,13 @@ class SourceAdapter(ABC):
     def __init__(self, config: AdapterConfig) -> None:
         self.config = config
 
-    async def __aenter__(self) -> "SourceAdapter":
+    async def __aenter__(self) -> SourceAdapter:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
         await self.close()
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # noqa: B027 - optional hook, not abstract
         """Release HTTP clients / sessions. Override if needed."""
 
     @abstractmethod

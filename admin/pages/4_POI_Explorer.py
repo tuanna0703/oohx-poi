@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import folium
 import streamlit as st
-from streamlit_folium import st_folium
-
 from admin.lib.queries import (
     admin_districts,
     admin_provinces,
@@ -13,6 +11,7 @@ from admin.lib.queries import (
     categories_with_counts,
     master_pois_for_map,
 )
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="POI Explorer — POI Lake", layout="wide")
 st.title("POI Explorer")
@@ -56,12 +55,12 @@ with st.sidebar:
     cats_df = categories_with_counts()
     cat_choice = st.selectbox(
         "Category",
-        options=["(any)"] + cats_df["category"].astype(str).tolist(),
+        options=["(any)", *cats_df["category"].astype(str).tolist()],
     )
 
     brand_df = brands_with_counts()
     brand_choice = st.selectbox(
-        "Brand", options=["(any)"] + brand_df["brand"].astype(str).tolist()
+        "Brand", options=["(any)", *brand_df["brand"].astype(str).tolist()]
     )
 
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.0, step=0.05)

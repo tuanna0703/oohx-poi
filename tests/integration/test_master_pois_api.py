@@ -12,14 +12,14 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from poi_lake.db import get_sessionmaker
-from poi_lake.db.models import APIClient, MasterPOI
+from poi_lake.db.models import APIClient
 from poi_lake.main import app
 from poi_lake.services.api_keys import generate_api_key
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 def _emb(seed: float = 0.42, dim: int = 384) -> str:

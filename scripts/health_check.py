@@ -14,7 +14,6 @@ from sqlalchemy import text
 from poi_lake.config import get_settings
 from poi_lake.db import get_engine
 
-
 REQUIRED_EXTENSIONS = {"postgis", "vector", "pgcrypto"}
 REQUIRED_TABLES = {
     "sources",

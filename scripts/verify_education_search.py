@@ -1,5 +1,7 @@
 """One-shot smoke test for the Cau Giay education sweep — used in PR demos."""
-import httpx, sys
+import sys
+
+import httpx
 
 key = sys.argv[1] if len(sys.argv) > 1 else "pl_r_-seiiu1AbSaPj8dJdg4jdxyjxz0OsMGBcs4A98Ke4"
 r = httpx.get(
