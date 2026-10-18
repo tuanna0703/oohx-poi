@@ -49,3 +49,13 @@ def test_rejects_non_serializable() -> None:
 
 def test_tuple_treated_as_list() -> None:
     assert content_hash({"loc": (21.0, 105.8)}) == content_hash({"loc": [21.0, 105.8]})
+
+
+def test_ignore_drops_top_level_keys() -> None:
+    a = {"title": "Circle K", "open_hours": "Mở cửa lúc 7:00"}
+    b = {"title": "Circle K", "open_hours": "Đang mở cửa"}
+    assert content_hash(a) != content_hash(b)
+    assert content_hash(a, frozenset({"open_hours"})) == content_hash(
+        b, frozenset({"open_hours"})
+    )
+    assert content_hash(a, frozenset({"open_hours"})) == content_hash({"title": "Circle K"})

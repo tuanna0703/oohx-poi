@@ -238,3 +238,28 @@ def test_zoom_for_radius() -> None:
     assert z(3000) == 14
     assert z(8000) == 13
     assert z(20000) == 12
+
+
+def test_row_to_record_drops_per_job_input_id() -> None:
+    row = {"input_id": "job-123", "place_id": "ChIJxxx-1", "title": "Circle K",
+           "latitude": "21.0250", "longitude": "105.8545"}
+    rec = GosomScraperAdapter._row_to_record(row)
+    assert rec is not None
+    assert "input_id" not in rec.raw_payload
+    other = GosomScraperAdapter._row_to_record({**row, "input_id": "job-456"})
+    assert other is not None and other.raw_payload == rec.raw_payload
+
+
+def test_row_to_record_fallback_id_is_stable() -> None:
+    # str hash() is salted per process; the fallback must not depend on it.
+    import hashlib
+
+    row = {"link": "https://maps.google.com/?cid=9", "title": "Quán"}
+    rec = GosomScraperAdapter._row_to_record(row)
+    assert rec is not None
+    expected = hashlib.sha1(b"https://maps.google.com/?cid=9").hexdigest()[:16]
+    assert rec.source_poi_id == f"gosom-{expected}"
+
+
+def test_open_hours_is_ignored_for_hashing() -> None:
+    assert "open_hours" in GosomScraperAdapter.hash_ignore

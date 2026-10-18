@@ -16,14 +16,19 @@ import json
 from typing import Any
 
 
-def content_hash(payload: dict[str, Any]) -> str:
+def content_hash(payload: dict[str, Any], ignore: frozenset[str] = frozenset()) -> str:
     """SHA-256 hex of the canonical JSON form of ``payload``.
 
     Canonicalization:
       * Sort keys at every depth.
       * Compact separators (no spaces).
       * UTF-8 encoding (we keep Unicode characters literal — important for VN names).
+
+    ``ignore`` drops top-level keys before hashing — fields a source rewrites on
+    every fetch of an unchanged place (see ``SourceAdapter.hash_ignore``).
     """
+    if ignore:
+        payload = {k: v for k, v in payload.items() if k not in ignore}
     canonical = json.dumps(
         payload,
         sort_keys=True,

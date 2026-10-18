@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import logging
 import uuid
@@ -51,6 +52,10 @@ _FAILED_STATUSES = frozenset({"failed", "error", "cancelled", "canceled"})
 class GosomScraperAdapter(SourceAdapter):
     code: ClassVar[str] = "gosom_scraper"
     name: ClassVar[str] = "gosom google-maps-scraper"
+    # gosom renders open_hours afresh on every scrape: measured on production,
+    # it was the field that differed in nearly every same-place pair once
+    # input_id was gone (5,311 pairs; the next field, review_count, 373).
+    hash_ignore: ClassVar[frozenset[str]] = frozenset({"open_hours"})
 
     def __init__(self, config: AdapterConfig) -> None:
         super().__init__(config)
@@ -295,7 +300,9 @@ class GosomScraperAdapter(SourceAdapter):
             link = row.get("link") or row.get("title") or ""
             if not link:
                 return None
-            spid = "gosom-" + str(abs(hash(link)))
+            # Not hash(): str hashing is salted per process, so the same place
+            # got a different id on every worker restart.
+            spid = "gosom-" + hashlib.sha1(link.encode("utf-8")).hexdigest()[:16]
 
         lat_s = (row.get("latitude") or "").strip()
         lng_s = (row.get("longitude") or "").strip()
@@ -308,7 +315,12 @@ class GosomScraperAdapter(SourceAdapter):
 
         # Drop empty cells so raw_payload stays small. CSV gives us strings
         # for everything; the normalize layer handles type coercion.
-        payload = {k: v for k, v in row.items() if v not in (None, "")}
+        # input_id is gosom's per-job id: it made every payload unique, so the
+        # same place scraped by two jobs never deduped at insert — 474k raw rows
+        # for 209k distinct places on production.
+        payload = {
+            k: v for k, v in row.items() if v not in (None, "") and k != "input_id"
+        }
         return RawPOIRecord(source_poi_id=spid, raw_payload=payload, location=location)
 
     async def _delete_job_quiet(self, job_id: str) -> None:

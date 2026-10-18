@@ -66,7 +66,9 @@ class IngestionService:
                 async for record in self._iter_records(adapter, job):
                     stats["fetched"] += 1
                     try:
-                        new_id = await self._insert_raw(record, source.id, job.id)
+                        new_id = await self._insert_raw(
+                            record, source.id, job.id, adapter.hash_ignore
+                        )
                     except SQLAlchemyError as exc:
                         logger.exception("raw_pois insert failed: %s", exc)
                         stats["errors"] += 1
@@ -133,13 +135,17 @@ class IngestionService:
         raise AdapterError(f"unsupported job_type {job.job_type!r}")
 
     async def _insert_raw(
-        self, record: RawPOIRecord, source_id: int, job_id: int
+        self,
+        record: RawPOIRecord,
+        source_id: int,
+        job_id: int,
+        hash_ignore: frozenset[str] = frozenset(),
     ) -> int | None:
         """Insert a raw_poi row, skipping if (source_id, source_poi_id, hash) exists.
 
         Returns the new ``raw_pois.id`` on insert; ``None`` on duplicate.
         """
-        digest = content_hash(record.raw_payload)
+        digest = content_hash(record.raw_payload, hash_ignore)
         location_wkt: str | None = None
         if record.location is not None:
             lat, lng = record.location

@@ -56,6 +56,10 @@ class SourceAdapter(ABC):
 
     code: ClassVar[str]
     name: ClassVar[str]
+    # Payload keys that change between fetches of an unchanged place. They stay
+    # in raw_payload but are left out of content_hash; otherwise every re-fetch
+    # looks like a new version and lands as another raw row.
+    hash_ignore: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: AdapterConfig) -> None:
         self.config = config
