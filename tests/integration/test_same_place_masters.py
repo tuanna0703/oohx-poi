@@ -220,3 +220,52 @@ async def test_fold_skips_a_group_that_spans_two_places(two_copies: dict) -> Non
         stats = await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
     assert stats["skipped_multi_place"] >= 1
     assert {r[2] for r in await _state([first, second])} == before, "left alone"
+
+
+async def test_fold_repoints_masters_retired_into_a_loser(two_copies: dict) -> None:
+    """A master already merged_away into the loser must end one hop from the survivor."""
+    first, second = two_copies["proc_ids"]
+    await _make_own_master(first, two_copies["source_id"])
+    await _make_own_master(second, two_copies["source_id"])
+    m_first, m_second = (r[2] for r in await _state([first, second]))
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        raw = RawPOI(
+            source_id=two_copies["source_id"],
+            source_poi_id=f"{two_copies['tag']}-old",
+            raw_payload={"name": "Circle K cũ"},
+            content_hash=hashlib.sha256(f"{two_copies['tag']}-old".encode()).hexdigest(),
+            location=f"SRID=4326;POINT({LNG} {LAT})",
+        )
+        s.add(raw)
+        await s.commit()
+        await s.refresh(raw)
+        old = ProcessedPOI(
+            raw_poi_id=raw.id, name_original="Circle K cũ", name_normalized="circle k cũ",
+            name_embedding=EMB, quality_score=0.8,
+            location=f"SRID=4326;POINT({LNG} {LAT})", merge_status="pending",
+        )
+        s.add(old)
+        await s.commit()
+        await s.refresh(old)
+        two_copies["proc_ids"].append(old.id)
+    await _make_own_master(old.id, two_copies["source_id"])
+    m_old = (await _state([old.id]))[0][2]
+
+    # Survivor is the oldest master (first); point the retired one at the loser.
+    async with sm() as s:
+        await s.execute(
+            text("UPDATE master_pois SET status = 'merged_away', merged_into = :to WHERE id = :id"),
+            {"to": m_second, "id": m_old},
+        )
+        await s.commit()
+        await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
+
+    async with sm() as s:
+        survivor = (await _state([first]))[0][2]
+        target = (
+            await s.execute(text("SELECT merged_into FROM master_pois WHERE id = :id"), {"id": m_old})
+        ).scalar_one()
+    assert survivor == m_first
+    assert target == survivor, "retired master must point straight at the survivor"

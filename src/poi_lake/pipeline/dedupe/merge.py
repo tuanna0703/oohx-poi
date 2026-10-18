@@ -1278,6 +1278,20 @@ class MergeService:
                     "losers": [str(x) for x in losers],
                 },
             )
+            # Masters retired into a loser earlier now point one hop short of
+            # the survivor. Repoint them so merged_into is always one hop: the
+            # first fold left 17 such chains behind July's remerge losers.
+            await session.execute(
+                text(
+                    "UPDATE master_pois SET merged_into = :mid, updated_at = NOW() "
+                    "WHERE status = :status AND merged_into = ANY(CAST(:losers AS UUID[]))"
+                ),
+                {
+                    "status": MasterPOIStatus.MERGED_AWAY.value,
+                    "mid": survivor_id,
+                    "losers": [str(x) for x in losers],
+                },
+            )
 
         await session.execute(
             text(
