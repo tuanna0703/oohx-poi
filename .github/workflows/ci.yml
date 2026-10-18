@@ -67,12 +67,14 @@ jobs:
           cache-from: type=gha,scope=admin
           cache-to: type=gha,scope=admin,mode=max
 
+      # The image runs as uid 1000 and the checkout belongs to the runner
+      # (uid 1001), so mount it read-only and keep tool caches out of it.
       - name: ruff
-        run: docker run --rm -v "$PWD:/w" -w /w poi-lake/api:ci ruff check src tests scripts admin
+        run: docker run --rm -v "$PWD:/w:ro" -w /w poi-lake/api:ci ruff check --no-cache src tests scripts admin
 
       - name: mypy (informational until the codebase is fully typed)
         continue-on-error: true
-        run: docker run --rm -v "$PWD:/w" -w /w poi-lake/api:ci mypy --no-incremental src
+        run: docker run --rm -v "$PWD:/w:ro" -w /w poi-lake/api:ci mypy --no-incremental --cache-dir=/tmp/mypy src
 
       - name: start postgres + redis
         run: |
