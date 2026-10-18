@@ -73,3 +73,8 @@ migrations/_local/
 secrets/
 docker-build.log
 .claude/
+
+# VPS-only config (see scripts/ci_deploy.sh)
+docker-compose.local.yml
+docker/caddy/sites/
+docker/caddy/*.bak*

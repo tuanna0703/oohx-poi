@@ -4,6 +4,9 @@ Single-host deployment plan for production. The whole stack runs on one
 VPS via docker-compose, with Caddy fronting it for TLS. Suitable up to
 roughly 50–100 req/s and 5M master POIs; scale-out is a Phase 8 problem.
 
+This guide covers provisioning. Routine deploys go through CI/CD — pushing
+to `main` deploys; see [cicd.md](cicd.md).
+
 ## 1. Provision the VPS
 
 Recommended sizing for the full pipeline (api + worker with embedding

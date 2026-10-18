@@ -21,7 +21,9 @@ services:
       - "443:443"
       - "443:443/udp"  # HTTP/3
     volumes:
-      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The directory, not the file: git replaces files on checkout, and a
+      # single-file bind mount keeps serving the old inode.
+      - ./docker/caddy:/etc/caddy:ro
       - poi_caddy_data:/data
       - poi_caddy_config:/config
     environment:

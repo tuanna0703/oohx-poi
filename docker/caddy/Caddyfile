@@ -85,3 +85,7 @@
         format json
     }
 }
+
+# Host-local sites (other products sharing this Caddy) live in untracked
+# docker/caddy/sites/*.caddy on the VPS — this repo is public. No match is fine.
+import /etc/caddy/sites/*.caddy
