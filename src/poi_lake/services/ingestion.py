@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -199,6 +200,7 @@ class IngestionService:
         job.stats = stats
         await self.session.commit()
         await self._update_crawl_plan(job, success=True, raw_count=stats["raw_count"])
+        await self._update_probe_cell(job, fetched=stats.get("fetched", 0))
 
     async def _fail(
         self, job: IngestionJob, reason: str, stats: dict[str, int] | None = None
@@ -218,6 +220,40 @@ class IngestionService:
         await self.session.commit()
         await self._update_crawl_plan(fresh, success=False, raw_count=0,
                                       error=reason[:500])
+        await self._update_probe_cell(fresh, fetched=None)
+
+    async def _update_probe_cell(self, job: IngestionJob, *, fetched: int | None) -> None:
+        """Record a crawl planner probe's verdict on its cell.
+
+        ``fetched=None`` is a failed attempt. The cell stays ``probing`` —
+        dramatiq retries the job — and after three failed attempts it is
+        treated as ``populated``: never write off a cell because the scraper
+        hiccupped.
+        """
+        cell_id = (job.params or {}).get("probe_cell_id")
+        if not cell_id:
+            return
+        if fetched is None:
+            stmt = text(
+                "UPDATE crawl_cells SET attempts = attempts + 1, "
+                "status = CASE WHEN attempts + 1 >= 3 THEN 'populated' ELSE status END "
+                "WHERE id = :id"
+            )
+            params: dict[str, Any] = {"id": int(cell_id)}
+        else:
+            stmt = text(
+                "UPDATE crawl_cells SET attempts = attempts + 1, fetched = :f, "
+                "probed_at = NOW(), "
+                "status = CASE WHEN :f > 0 THEN 'populated' ELSE 'empty' END "
+                "WHERE id = :id"
+            )
+            params = {"id": int(cell_id), "f": int(fetched)}
+        try:
+            await self.session.execute(stmt, params)
+            await self.session.commit()
+        except SQLAlchemyError as exc:
+            logger.warning("probe cell update failed for cell %s: %s", cell_id, exc)
+            await self.session.rollback()
 
     async def _update_crawl_plan(
         self,

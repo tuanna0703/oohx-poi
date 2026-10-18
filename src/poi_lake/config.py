@@ -69,6 +69,10 @@ class Settings(BaseSettings):
         alias="CRAWL_PRIORITY_PROVINCES",
     )
     crawl_recrawl_days: int = Field(default=30, alias="CRAWL_RECRAWL_DAYS")
+    # Probe each grid cell once with broad keywords and skip every category job
+    # for cells that come back empty. 88% of jobs returned nothing before this:
+    # the grid covers whole province bboxes (sea, mountains, Laos).
+    crawl_probe_cells: bool = Field(default=True, alias="CRAWL_PROBE_CELLS")
 
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")

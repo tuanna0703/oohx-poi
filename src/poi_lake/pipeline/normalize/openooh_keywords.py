@@ -15,6 +15,12 @@ Reference taxonomy: https://github.com/openooh/venue-taxonomy
 
 from __future__ import annotations
 
+# Pseudo-category for the crawl planner's cell probe: is there anything here at
+# all? The broadest everyday place types, in Vietnamese, because a probe at a
+# populated rural cell found 10 "tạp hóa" and 0 supermarkets (2026-10-18).
+PROBE_CATEGORY = "_probe"
+PROBE_KEYWORDS: tuple[str, ...] = ("quán ăn", "tạp hóa", "cà phê", "cửa hàng")
+
 # Each value is a tuple so callers can rely on stable iteration order
 # (we hand it to gosom verbatim — first keyword shows up first in the UI).
 _KEYWORDS: dict[str, tuple[str, ...]] = {

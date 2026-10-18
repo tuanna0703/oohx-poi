@@ -167,6 +167,14 @@ if c["jobs_24h"]:
                    f"trung bình {c['fetched_24h'] / c['jobs_24h']:.1f} kết quả/job; "
                    f"{n(failed)} job lỗi."))
 
+if c["cells_known"]:
+    pending_cells = c["cells_known"] - c["cells_populated"] - c["cells_empty"]
+    checks.append(("Thăm dò ô", OK,
+                   f"{n(c['cells_known'])} ô đã lập: {n(c['cells_populated'])} có dữ liệu, "
+                   f"{n(c['cells_empty'])} trống, {n(pending_cells)} chưa thăm dò. "
+                   f"{n(c['probes_24h'])} lượt thăm dò trong 24 giờ; "
+                   f"đã bỏ qua {n(c['cells_skipped'])} lượt crawl vào ô trống."))
+
 if llm_paused:
     checks.append(("Gộp trùng (dedupe)", BAD, "Đang tạm dừng vì Anthropic API từ chối — xem banner phía trên."))
 elif t["pending"] > 50_000:

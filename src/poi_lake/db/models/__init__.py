@@ -3,6 +3,7 @@
 from poi_lake.db.models.admin_unit import AdminUnit
 from poi_lake.db.models.api_client import APIClient
 from poi_lake.db.models.brand import Brand
+from poi_lake.db.models.crawl_cell import CrawlCell, CrawlCellStatus
 from poi_lake.db.models.crawl_plan import CrawlPlan, CrawlPlanStatus
 from poi_lake.db.models.ingestion_job import IngestionJob, IngestionJobStatus, IngestionJobType
 from poi_lake.db.models.master_poi import MasterPOI, MasterPOIStatus
@@ -16,6 +17,8 @@ __all__ = [
     "APIClient",
     "AdminUnit",
     "Brand",
+    "CrawlCell",
+    "CrawlCellStatus",
     "CrawlPlan",
     "CrawlPlanStatus",
     "IngestionJob",

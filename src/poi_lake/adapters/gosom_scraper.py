@@ -146,12 +146,16 @@ class GosomScraperAdapter(SourceAdapter):
         and fall through to the verbatim path.
         """
         from poi_lake.pipeline.normalize.openooh_keywords import (
+            PROBE_CATEGORY,
+            PROBE_KEYWORDS,
             is_openooh_code,
             keywords_for_openooh,
         )
 
         if not category:
             return GosomScraperAdapter._default_keywords()
+        if category == PROBE_CATEGORY:
+            return list(PROBE_KEYWORDS)
         if is_openooh_code(category):
             return keywords_for_openooh(category)
         return [category]

@@ -121,14 +121,16 @@ def crawl_progress() -> dict[str, Any]:
       COUNT(*) FILTER (WHERE status = 'done')                    AS rows_done,
       COUNT(*) FILTER (WHERE status = 'paused')                  AS rows_paused,
       COUNT(*) FILTER (WHERE status IN ('pending', 'in_progress')) AS rows_active,
+      -- category jobs only: a probe on an empty cell returning nothing is
+      -- the probe doing its job, not wasted crawl.
       (SELECT COUNT(*) FROM ingestion_jobs
-        WHERE status = 'completed'
+        WHERE status = 'completed' AND NOT params ? 'probe_cell_id'
           AND completed_at >= NOW() - INTERVAL '24 hours')       AS jobs_24h,
       (SELECT COUNT(*) FROM ingestion_jobs
         WHERE status = 'failed'
           AND completed_at >= NOW() - INTERVAL '24 hours')       AS jobs_failed_24h,
       (SELECT COUNT(*) FROM ingestion_jobs
-        WHERE status = 'completed'
+        WHERE status = 'completed' AND NOT params ? 'probe_cell_id'
           AND completed_at >= NOW() - INTERVAL '24 hours'
           AND COALESCE((stats->>'fetched')::int, 0) = 0)         AS jobs_empty_24h,
       (SELECT COALESCE(SUM((stats->>'fetched')::int), 0) FROM ingestion_jobs
@@ -136,7 +138,14 @@ def crawl_progress() -> dict[str, Any]:
           AND completed_at >= NOW() - INTERVAL '24 hours')       AS fetched_24h,
       (SELECT COALESCE(SUM((stats->>'new')::int), 0) FROM ingestion_jobs
         WHERE status = 'completed'
-          AND completed_at >= NOW() - INTERVAL '24 hours')       AS new_24h
+          AND completed_at >= NOW() - INTERVAL '24 hours')       AS new_24h,
+      (SELECT COUNT(*) FROM ingestion_jobs
+        WHERE status = 'completed' AND params ? 'probe_cell_id'
+          AND completed_at >= NOW() - INTERVAL '24 hours')       AS probes_24h,
+      COALESCE(SUM(cells_skipped), 0)                            AS cells_skipped,
+      (SELECT COUNT(*) FROM crawl_cells)                         AS cells_known,
+      (SELECT COUNT(*) FROM crawl_cells WHERE status = 'populated') AS cells_populated,
+      (SELECT COUNT(*) FROM crawl_cells WHERE status = 'empty')  AS cells_empty
     FROM crawl_plan
     """
     return _df(sql).iloc[0].to_dict()

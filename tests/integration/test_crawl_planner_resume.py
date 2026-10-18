@@ -152,6 +152,8 @@ def _tiny_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "crawl_planner_minutes", 10, raising=False)
     monkeypatch.setattr(settings, "crawl_rate_per_hour", 200, raising=False)
     monkeypatch.setattr(settings, "crawl_cell_size_m", CELL_SIZE_M, raising=False)
+    # These tests are about the resume cursor; cell probing has its own file.
+    monkeypatch.setattr(settings, "crawl_probe_cells", False, raising=False)
 
 
 async def test_row_resumes_across_ticks_until_grid_exhausted(plan_row: dict) -> None:

@@ -11,6 +11,13 @@ rate. On each tick:
 5. Advance ``cells_enqueued`` by the slice size and mark the row
    ``in_progress``; the on-completion hook tracks ``cells_done``.
 
+Cell probing (``CRAWL_PROBE_CELLS``, on by default): before any category is
+crawled in a province, each of its cells (``crawl_cells``) gets one probe job
+with broad keywords. A probe that finds nothing marks the cell ``empty``, and
+every category row then passes over it without a job (counted in
+``cells_skipped`` and ``cells_done``). Before this, 88% of jobs returned
+nothing — the grid spans whole province bboxes, sea and Laos included.
+
 Throttling shape: tick every ``CRAWL_PLANNER_MINUTES`` minutes; per tick
 budget = ``CRAWL_RATE_PER_HOUR / (60 / CRAWL_PLANNER_MINUTES)``. Default
 200/hour and 10-minute tick → 33 jobs per tick.
@@ -74,6 +81,8 @@ async def _tick() -> dict[str, Any]:
             # ---- maintenance: recompute pois_master + auto-pause check ----
             await _recompute_pois_master(session)
             await _finalize_completed(session)
+            if settings.crawl_probe_cells:
+                await _reset_stale_probes(session)
             paused_count = await _maybe_auto_pause(session)
             if paused_count:
                 logger.warning(
@@ -151,8 +160,13 @@ async def _tick() -> dict[str, Any]:
 
             # Generate cells per plan row, enqueue jobs, track stats.
             from poi_lake.api.v1.admin import _grid_centers
+            from poi_lake.pipeline.normalize.openooh_keywords import PROBE_CATEGORY
+
             picked = 0
             jobs_enqueued = 0
+            probes = 0
+            cells_skipped = 0
+            to_send: list[int] = []
             for r in rows:
                 if jobs_enqueued >= budget:
                     break
@@ -186,38 +200,56 @@ async def _tick() -> dict[str, Any]:
                     # dispatch. Leave it to the completion sweep above.
                     continue
                 allowance = max(0, budget - jobs_enqueued)
-                use_centers = centers[offset : offset + allowance]
                 radius = size // 2
 
-                # Enqueue ingest jobs, tagged with crawl_plan_id.
-                from poi_lake.workers.ingest import run_ingestion_job
-                job_ids = []
-                for lat, lng in use_centers:
-                    params = {
-                        "lat": lat, "lng": lng, "radius_m": radius,
-                        "category": r.openooh_code,
-                        "crawl_plan_id": int(r.id),
-                    }
-                    job_id_row = (
-                        await session.execute(
-                            text(
-                                """
-                                INSERT INTO ingestion_jobs
-                                    (source_id, job_type, params, status, stats)
-                                VALUES
-                                    (:src, 'area_sweep', cast(:params AS jsonb),
-                                     'pending', '{}'::jsonb)
-                                RETURNING id
-                                """
-                            ),
-                            {
-                                "src": src_id,
-                                "params": _json_dumps(params),
-                            },
-                        )
-                    ).scalar_one()
-                    job_ids.append(int(job_id_row))
+                cell_status: dict[int, str] = {}
+                if settings.crawl_probe_cells:
+                    cells = await _ensure_cells(session, r.province_code, size, centers)
+                    cell_status = {idx: st for idx, (_cid, st) in cells.items()}
+                    # Probe the province before crawling any category in it: a
+                    # category job on an empty cell is the waste this avoids.
+                    unknown = [i for i, st in cell_status.items() if st == "unknown"]
+                    if unknown or "probing" in cell_status.values():
+                        for idx in unknown[:allowance]:
+                            cid = cells[idx][0]
+                            lat, lng = centers[idx]
+                            jid = await _insert_job(session, src_id, {
+                                "lat": lat, "lng": lng, "radius_m": radius,
+                                "category": PROBE_CATEGORY, "probe_cell_id": cid,
+                            })
+                            await session.execute(
+                                text(
+                                    "UPDATE crawl_cells SET status = 'probing', "
+                                    "probe_job_id = :j, dispatched_at = NOW() WHERE id = :c"
+                                ),
+                                {"j": jid, "c": cid},
+                            )
+                            to_send.append(jid)
+                            jobs_enqueued += 1
+                            probes += 1
+                        continue
+
+                # Walk the grid from the cursor: dispatch populated (or
+                # unprobed, when probing is off) cells, pass over empty ones.
+                # Skips cost no budget, so cap them per tick to keep one
+                # transaction small.
+                job_ids: list[int] = []
+                skipped = 0
+                pos = offset
+                while pos < cells_total and len(job_ids) < allowance and skipped < 5000:
+                    if cell_status.get(pos) == "empty":
+                        skipped += 1
+                    else:
+                        lat, lng = centers[pos]
+                        job_ids.append(await _insert_job(session, src_id, {
+                            "lat": lat, "lng": lng, "radius_m": radius,
+                            "category": r.openooh_code,
+                            "crawl_plan_id": int(r.id),
+                        }))
+                    pos += 1
                 jobs_enqueued += len(job_ids)
+                cells_skipped += skipped
+                to_send.extend(job_ids)
 
                 await session.execute(
                     text(
@@ -225,23 +257,29 @@ async def _tick() -> dict[str, Any]:
                         UPDATE crawl_plan SET
                           status = 'in_progress',
                           cells_total = :total,
-                          cells_enqueued = cells_enqueued + :n,
+                          cells_enqueued = :pos,
+                          cells_done = cells_done + :skipped,
+                          cells_skipped = cells_skipped + :skipped,
                           attempts = attempts + 1,
                           last_attempt_at = NOW()
                         WHERE id = :id
                         """
                     ),
-                    {"total": cells_total, "n": len(job_ids), "id": int(r.id)},
+                    {"total": cells_total, "pos": pos, "skipped": skipped, "id": int(r.id)},
                 )
                 picked += 1
-                # Dispatch after row update so worker doesn't race.
-                for jid in job_ids:
-                    run_ingestion_job.send(jid)
 
             await session.commit()
+            # Only now do the job rows exist for a worker to load.
+            from poi_lake.workers.ingest import run_ingestion_job
+
+            for jid in to_send:
+                run_ingestion_job.send(jid)
             return {
                 "picked": picked,
                 "jobs_enqueued": jobs_enqueued,
+                "probes": probes,
+                "cells_skipped": cells_skipped,
                 "budget": budget,
                 "in_flight_before": int(in_flight),
             }
@@ -255,6 +293,124 @@ async def _tick() -> dict[str, Any]:
 def _json_dumps(d: dict[str, Any]) -> str:
     import json
     return json.dumps(d, ensure_ascii=False, default=str)
+
+
+async def _insert_job(session, src_id: int, params: dict[str, Any]) -> int:  # type: ignore[no-untyped-def]
+    from sqlalchemy import text
+
+    return int(
+        (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO ingestion_jobs (source_id, job_type, params, status, stats)
+                    VALUES (:src, 'area_sweep', cast(:params AS jsonb), 'pending', '{}'::jsonb)
+                    RETURNING id
+                    """
+                ),
+                {"src": src_id, "params": _json_dumps(params)},
+            )
+        ).scalar_one()
+    )
+
+
+async def _ensure_cells(  # type: ignore[no-untyped-def]
+    session, province_code: str, size: int, centers: list[tuple[float, float]]
+) -> dict[int, tuple[int, str]]:
+    """Return ``{idx: (cell_id, status)}`` for a province's grid, creating it once.
+
+    New cells start ``unknown``; any cell an earlier category job already
+    found something in is marked ``populated`` straight away — there is no
+    point probing what we know is inhabited. Matching is on the job's
+    lat/lng, which came from the same ``_grid_centers`` call.
+    """
+    from sqlalchemy import text
+
+    params = {"p": province_code, "s": size}
+    found = (
+        await session.execute(
+            text(
+                "SELECT idx, id, status FROM crawl_cells "
+                "WHERE province_code = :p AND cell_size_m = :s"
+            ),
+            params,
+        )
+    ).all()
+    if found:
+        return {int(i): (int(cid), st) for i, cid, st in found}
+
+    await session.execute(
+        text(
+            """
+            INSERT INTO crawl_cells (province_code, cell_size_m, idx, lat, lng)
+            SELECT :p, :s, t.idx, round(t.lat::numeric, 6), round(t.lng::numeric, 6)
+            FROM unnest(CAST(:idx AS INT[]), CAST(:lat AS FLOAT8[]), CAST(:lng AS FLOAT8[]))
+                 AS t(idx, lat, lng)
+            ON CONFLICT ON CONSTRAINT uq_crawl_cells_prov_size_idx DO NOTHING
+            """
+        ),
+        {
+            **params,
+            "idx": list(range(len(centers))),
+            "lat": [c[0] for c in centers],
+            "lng": [c[1] for c in centers],
+        },
+    )
+    await session.execute(
+        text(
+            """
+            UPDATE crawl_cells c SET status = 'populated', probed_at = NOW()
+            FROM (
+                SELECT DISTINCT round((j.params->>'lat')::numeric, 6) AS lat,
+                                round((j.params->>'lng')::numeric, 6) AS lng
+                FROM ingestion_jobs j
+                JOIN crawl_plan cp ON cp.id = (j.params->>'crawl_plan_id')::bigint
+                WHERE cp.province_code = :p AND cp.cell_size_m = :s
+                  AND j.status = 'completed'
+                  AND COALESCE((j.stats->>'fetched')::int, 0) > 0
+            ) h
+            WHERE c.province_code = :p AND c.cell_size_m = :s
+              AND c.lat = h.lat AND c.lng = h.lng
+            """
+        ),
+        params,
+    )
+    rows = (
+        await session.execute(
+            text(
+                "SELECT idx, id, status FROM crawl_cells "
+                "WHERE province_code = :p AND cell_size_m = :s"
+            ),
+            params,
+        )
+    ).all()
+    logger.info(
+        "crawl planner: created %d cells for %s (%d already known populated)",
+        len(rows), province_code, sum(1 for r in rows if r.status == "populated"),
+    )
+    return {int(i): (int(cid), st) for i, cid, st in rows}
+
+
+async def _reset_stale_probes(session) -> int:  # type: ignore[no-untyped-def]
+    """Return cells stuck in ``probing`` to ``unknown``.
+
+    A worker restart drops in-flight dramatiq messages, so a probe job can
+    vanish without ever reporting back; its province would then wait forever.
+    """
+    from sqlalchemy import text
+
+    result = await session.execute(
+        text(
+            "UPDATE crawl_cells SET status = 'unknown' "
+            "WHERE status = 'probing' AND dispatched_at < NOW() - INTERVAL '2 hours' "
+            "RETURNING id"
+        )
+    )
+    n = len(result.all())
+    if n:
+        await session.commit()
+        logger.warning("crawl planner: reset %d stale probes", n)
+    return n
 
 
 async def _recompute_pois_master(session) -> None:  # type: ignore[no-untyped-def]
@@ -352,7 +508,7 @@ async def _maybe_auto_pause(session) -> int:  # type: ignore[no-untyped-def]
                       AND completed_at >= NOW() - INTERVAL '30 minutes'
                   ) AS failed
                 FROM ingestion_jobs
-                WHERE params ? 'crawl_plan_id'
+                WHERE params ? 'crawl_plan_id' OR params ? 'probe_cell_id'
                 """
             )
         )

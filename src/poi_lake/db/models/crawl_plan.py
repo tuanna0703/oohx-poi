@@ -56,6 +56,9 @@ class CrawlPlan(Base):
     cells_enqueued: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cells_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cells_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Cells passed over because their probe found nothing; also counted in
+    # cells_done so completion checks stay unchanged.
+    cells_skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     pois_raw: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     pois_master: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
