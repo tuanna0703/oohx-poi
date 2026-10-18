@@ -74,6 +74,127 @@ def jobs_status_breakdown() -> pd.DataFrame:
     return _df(sql)
 
 
+# --------------------------------------------------------------- overview
+# The Dashboard page. One trip per section; 60s cache — these scan the whole
+# raw/processed tables, which is cheap at ~500k rows but not free.
+
+
+@st.cache_data(ttl=60)
+def overview_totals() -> dict[str, Any]:
+    sql = """
+    SELECT
+      (SELECT COUNT(*) FROM master_pois WHERE status = 'active')               AS masters,
+      (SELECT COUNT(*) FROM master_pois WHERE status = 'active'
+                         AND created_at >= NOW() - INTERVAL '24 hours')        AS masters_24h,
+      (SELECT COUNT(*) FROM master_pois WHERE status = 'active'
+                         AND created_at >= NOW() - INTERVAL '7 days')          AS masters_7d,
+      (SELECT COUNT(*) FROM master_pois WHERE status = 'merged_away')          AS merged_away,
+      (SELECT COUNT(*) FROM master_pois WHERE status = 'active'
+                         AND openooh_category IS NOT NULL)                     AS masters_categorized,
+      (SELECT COUNT(DISTINCT province_code) FROM master_pois
+                         WHERE status = 'active')                              AS provinces,
+      (SELECT COUNT(*) FROM raw_pois)                                          AS raw,
+      (SELECT COUNT(*) FROM raw_pois
+                         WHERE fetched_at >= NOW() - INTERVAL '24 hours')      AS raw_24h,
+      (SELECT COUNT(*) FROM raw_pois
+                         WHERE fetched_at >= NOW() - INTERVAL '7 days')        AS raw_7d,
+      (SELECT COUNT(*) FROM raw_pois WHERE processed_at IS NULL)               AS raw_unprocessed,
+      (SELECT COUNT(*) FROM processed_pois)                                    AS processed,
+      (SELECT COUNT(*) FROM processed_pois WHERE merge_status = 'pending')     AS pending,
+      (SELECT MAX(fetched_at) FROM raw_pois)                                   AS last_raw_at,
+      (SELECT MAX(created_at) FROM master_pois)                                AS last_master_at,
+      (SELECT MAX(completed_at) FROM ingestion_jobs)                           AS last_job_at,
+      (SELECT COUNT(*) FROM ingestion_jobs
+                         WHERE status IN ('pending', 'running'))               AS jobs_inflight
+    """
+    return _df(sql).iloc[0].to_dict()
+
+
+@st.cache_data(ttl=60)
+def crawl_progress() -> dict[str, Any]:
+    """Coverage of the province × category grid, and how the last 24h went."""
+    sql = """
+    SELECT
+      COALESCE(SUM(cells_total), 0)                              AS cells_total,
+      COALESCE(SUM(cells_done + cells_failed), 0)                AS cells_done,
+      COUNT(*)                                                   AS rows_total,
+      COUNT(*) FILTER (WHERE status = 'done')                    AS rows_done,
+      COUNT(*) FILTER (WHERE status = 'paused')                  AS rows_paused,
+      COUNT(*) FILTER (WHERE status IN ('pending', 'in_progress')) AS rows_active,
+      (SELECT COUNT(*) FROM ingestion_jobs
+        WHERE status = 'completed'
+          AND completed_at >= NOW() - INTERVAL '24 hours')       AS jobs_24h,
+      (SELECT COUNT(*) FROM ingestion_jobs
+        WHERE status = 'failed'
+          AND completed_at >= NOW() - INTERVAL '24 hours')       AS jobs_failed_24h,
+      (SELECT COUNT(*) FROM ingestion_jobs
+        WHERE status = 'completed'
+          AND completed_at >= NOW() - INTERVAL '24 hours'
+          AND COALESCE((stats->>'fetched')::int, 0) = 0)         AS jobs_empty_24h,
+      (SELECT COALESCE(SUM((stats->>'fetched')::int), 0) FROM ingestion_jobs
+        WHERE status = 'completed'
+          AND completed_at >= NOW() - INTERVAL '24 hours')       AS fetched_24h,
+      (SELECT COALESCE(SUM((stats->>'new')::int), 0) FROM ingestion_jobs
+        WHERE status = 'completed'
+          AND completed_at >= NOW() - INTERVAL '24 hours')       AS new_24h
+    FROM crawl_plan
+    """
+    return _df(sql).iloc[0].to_dict()
+
+
+@st.cache_data(ttl=300)
+def daily_growth(days: int = 30) -> pd.DataFrame:
+    """Per day: raw records fetched, and places (active masters) created."""
+    sql = """
+    WITH d AS (
+      SELECT generate_series(
+        date_trunc('day', NOW()) - make_interval(days => :days - 1),
+        date_trunc('day', NOW()), INTERVAL '1 day') AS day
+    )
+    SELECT d.day::date AS day,
+      (SELECT COUNT(*) FROM raw_pois r
+        WHERE r.fetched_at >= d.day AND r.fetched_at < d.day + INTERVAL '1 day') AS raw_new,
+      (SELECT COUNT(*) FROM master_pois m
+        WHERE m.status = 'active'
+          AND m.created_at >= d.day AND m.created_at < d.day + INTERVAL '1 day') AS masters_new
+    FROM d ORDER BY d.day
+    """
+    return _df(sql, days=days)
+
+
+@st.cache_data(ttl=300)
+def province_coverage() -> pd.DataFrame:
+    sql = """
+    SELECT p.code, p.name,
+      COALESCE(m.n, 0)                                       AS masters,
+      COALESCE(c.cells_total, 0)                             AS cells_total,
+      COALESCE(c.cells_done, 0)                              AS cells_done
+    FROM admin_units p
+    LEFT JOIN (
+      SELECT province_code, COUNT(*) AS n FROM master_pois
+      WHERE status = 'active' GROUP BY province_code
+    ) m ON m.province_code = p.code
+    LEFT JOIN (
+      SELECT province_code, SUM(cells_total) AS cells_total,
+             SUM(cells_done + cells_failed) AS cells_done
+      FROM crawl_plan GROUP BY province_code
+    ) c ON c.province_code = p.code
+    WHERE p.level = 1
+    ORDER BY masters DESC, p.name
+    """
+    return _df(sql)
+
+
+@st.cache_data(ttl=300)
+def category_breakdown() -> pd.DataFrame:
+    sql = """
+    SELECT COALESCE(openooh_category, '(chưa phân loại)') AS category, COUNT(*) AS masters
+    FROM master_pois WHERE status = 'active'
+    GROUP BY 1 ORDER BY 2 DESC
+    """
+    return _df(sql)
+
+
 # --------------------------------------------------------------- ingestion-jobs
 
 
