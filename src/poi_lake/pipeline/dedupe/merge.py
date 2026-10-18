@@ -158,6 +158,28 @@ def _source_id_of(r: ProcessedPOI) -> int:
     return getattr(r, "_source_id", 0) or 0
 
 
+async def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
+    """Stash each row's raw ``source_id`` and ``source_poi_id`` on it.
+
+    ``_source_id`` feeds the priority tie-breaker; ``_source_poi_id`` lets
+    ``_components_of`` join two copies of one place without scoring them.
+    """
+    found = {
+        rid: (sid, spid)
+        for rid, sid, spid in (
+            await session.execute(
+                select(RawPOI.id, RawPOI.source_id, RawPOI.source_poi_id).where(
+                    RawPOI.id.in_({r.raw_poi_id for r in rows})
+                )
+            )
+        ).all()
+    }
+    for r in rows:
+        sid, spid = found.get(r.raw_poi_id, (None, None))
+        r._source_id = sid  # type: ignore[attr-defined]
+        r._source_poi_id = spid  # type: ignore[attr-defined]
+
+
 # --- merge service ----------------------------------------------------------
 
 
@@ -207,19 +229,7 @@ class MergeService:
         if not rows:
             return None
 
-        # Attach source_id for the priority tie-breaker.
-        raw_to_source = {
-            rid: sid
-            for rid, sid in (
-                await session.execute(
-                    select(RawPOI.id, RawPOI.source_id).where(
-                        RawPOI.id.in_({r.raw_poi_id for r in rows})
-                    )
-                )
-            ).all()
-        }
-        for r in rows:
-            r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
+        await _attach_sources(session, rows)
 
         src_rows = (await session.execute(select(Source.id, Source.priority))).all()
         priority_by_source = {sid: pri for sid, pri in src_rows}
@@ -250,8 +260,9 @@ class MergeService:
         ``commit_every`` of them makes progress durable, and ``max_clusters``
         keeps a pass comfortably inside the time limit.
 
-        Returns ``{clusters, masters_created, members_merged, llm_calls,
-        llm_cached, llm_errors, clusters_available}``. ``clusters_available`` is
+        Returns ``{clusters, masters_created, members_merged,
+        attached_to_existing, llm_calls, llm_cached, llm_errors,
+        clusters_available}``. ``clusters_available`` is
         the total this pass could see, so a caller can tell whether a backlog
         remains; ``llm_calls`` counts billed API round-trips and ``llm_cached``
         the pairs Redis already knew; ``llm_errors`` is non-zero when the
@@ -269,6 +280,17 @@ class MergeService:
         self._llm_disabled_reason = None  # a fresh pass retries the API once
         started = time.monotonic()
 
+        # Pre-fetch source priorities (cheap, small table).
+        src_rows = (await session.execute(select(Source.id, Source.priority))).all()
+        priority_by_source = {sid: pri for sid, pri in src_rows}
+
+        # Before clustering: a pending row whose place already has a master
+        # joins that master. The clusterer only sees pending rows, so without
+        # this a re-crawl mints a second master for the same place — 34k
+        # place_ids were split across masters on production this way.
+        attached = await self._attach_known_places(session, priority_by_source)
+        await session.commit()
+
         clusterer = SpatialClusterer()
         cluster_map = await clusterer.cluster(session, eps_meters=eps_meters, only_pending=True)
         groups = clusterer.group(cluster_map)
@@ -277,15 +299,12 @@ class MergeService:
             "clusters": 0,
             "masters_created": 0,
             "members_merged": 0,
+            "attached_to_existing": attached,
             **LLMUsage().as_stats(),
             "clusters_available": len(groups),
         }
         if not groups:
             return stats
-
-        # Pre-fetch source priorities (cheap, small table).
-        src_rows = (await session.execute(select(Source.id, Source.priority))).all()
-        priority_by_source = {sid: pri for sid, pri in src_rows}
 
         for member_ids in groups.values():
             if max_clusters is not None and stats["clusters"] >= max_clusters:
@@ -396,18 +415,7 @@ class MergeService:
                 continue  # already one master, nothing to fold
 
             stats["clusters"] += 1
-            raw_to_source = {
-                rid: sid
-                for rid, sid in (
-                    await session.execute(
-                        select(RawPOI.id, RawPOI.source_id).where(
-                            RawPOI.id.in_({r.raw_poi_id for r in rows})
-                        )
-                    )
-                ).all()
-            }
-            for r in rows:
-                r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
+            await _attach_sources(session, rows)
             await self._attach_coords(session, rows)
 
             try:
@@ -438,6 +446,155 @@ class MergeService:
                 stats["members_moved"] += len(members)
 
             if stats["clusters"] % commit_every == 0:
+                await session.commit()
+
+        await session.commit()
+        return stats
+
+    async def _attach_known_places(
+        self, session: AsyncSession, priority_by_source: dict[int, int]
+    ) -> int:
+        """Fold pending rows into the active master that already holds their
+        source record (same ``source_id`` + ``source_poi_id``).
+
+        Returns the number of pending rows attached.
+        """
+        found = (
+            await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (p.id) p.id AS pid, mp.id AS mid
+                    FROM processed_pois p
+                    JOIN raw_pois r  ON r.id = p.raw_poi_id
+                    JOIN raw_pois r2 ON r2.source_id = r.source_id
+                                    AND r2.source_poi_id = r.source_poi_id
+                                    AND r2.id <> r.id
+                    JOIN processed_pois p2 ON p2.raw_poi_id = r2.id
+                    JOIN master_pois mp ON mp.id = p2.merged_into
+                                       AND mp.status = 'active'
+                    WHERE p.merge_status = 'pending'
+                    ORDER BY p.id, mp.sources_count DESC, mp.created_at ASC, mp.id ASC
+                    """
+                )
+            )
+        ).all()
+        by_master: dict[uuid.UUID, list[int]] = {}
+        for pid, mid in found:
+            by_master.setdefault(mid, []).append(pid)
+
+        for mid, pids in by_master.items():
+            members = (
+                await session.execute(
+                    select(ProcessedPOI).where(
+                        (ProcessedPOI.merged_into == mid) | ProcessedPOI.id.in_(pids)
+                    )
+                )
+            ).scalars().all()
+            await _attach_sources(session, members)
+            await self._grow_master(
+                session, mid, members, priority_by_source, [], reason="same-place attach"
+            )
+        return len(found)
+
+    async def same_place_master_groups(
+        self, session: AsyncSession
+    ) -> list[list[uuid.UUID]]:
+        """Active masters that share a source record, grouped transitively.
+
+        Each group is the set of masters holding copies of the same place(s);
+        it should be one master. Sorted largest first, ids sorted within.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT array_agg(DISTINCT p.merged_into) AS masters
+                    FROM processed_pois p
+                    JOIN raw_pois r ON r.id = p.raw_poi_id
+                    JOIN master_pois mp ON mp.id = p.merged_into
+                                       AND mp.status = 'active'
+                    WHERE p.merge_status = 'merged'
+                    GROUP BY r.source_id, r.source_poi_id
+                    HAVING COUNT(DISTINCT p.merged_into) > 1
+                    """
+                )
+            )
+        ).scalars().all()
+
+        parent: dict[uuid.UUID, uuid.UUID] = {}
+
+        def find(x: uuid.UUID) -> uuid.UUID:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for masters in rows:
+            head = find(masters[0])
+            for m in masters[1:]:
+                rm = find(m)
+                if rm != head:
+                    parent[rm] = head
+
+        groups: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for m in list(parent):
+            groups.setdefault(find(m), []).append(m)
+        return sorted(
+            (sorted(g, key=str) for g in groups.values()),
+            key=lambda g: (-len(g), str(g[0])),
+        )
+
+    async def fold_same_place_masters(
+        self,
+        session: AsyncSession,
+        *,
+        max_groups: int | None = None,
+        max_group_size: int = 10,
+        commit_every: int = 100,
+    ) -> dict[str, int]:
+        """Repair masters split over one place: fold each group from
+        ``same_place_master_groups`` into its survivor.
+
+        No scoring and no LLM — a shared Google place_id is the identity, not
+        evidence. Groups larger than ``max_group_size`` are skipped: that many
+        masters chained through shared places usually means one of them is an
+        over-merge, which ``split_master`` should look at first.
+        """
+        groups = await self.same_place_master_groups(session)
+        stats = {
+            "groups_available": len(groups),
+            "groups": 0,
+            "masters_merged_away": 0,
+            "members_moved": 0,
+            "skipped_large": 0,
+        }
+        src_rows = (await session.execute(select(Source.id, Source.priority))).all()
+        priority_by_source = {sid: pri for sid, pri in src_rows}
+
+        for group in groups:
+            if max_groups is not None and stats["groups"] >= max_groups:
+                break
+            if len(group) > max_group_size:
+                stats["skipped_large"] += 1
+                logger.warning("same-place fold: skipped group of %d masters", len(group))
+                continue
+            survivor = await self._pick_survivor(session, set(group))
+            losers = [m for m in group if m != survivor]
+            members = (
+                await session.execute(
+                    select(ProcessedPOI).where(ProcessedPOI.merged_into.in_(group))
+                )
+            ).scalars().all()
+            await _attach_sources(session, members)
+            await self._grow_master(
+                session, survivor, members, priority_by_source, losers,
+                reason="same-place fold",
+            )
+            stats["groups"] += 1
+            stats["masters_merged_away"] += len(losers)
+            stats["members_moved"] += len(members)
+            if stats["groups"] % commit_every == 0:
                 await session.commit()
 
         await session.commit()
@@ -501,18 +658,7 @@ class MergeService:
             return {"groups": 1, "changed": False, "masters": [str(master_id)]}
 
         by_id = {m.id: m for m in members}
-        raw_to_source = {
-            rid: sid
-            for rid, sid in (
-                await session.execute(
-                    select(RawPOI.id, RawPOI.source_id).where(
-                        RawPOI.id.in_({m.raw_poi_id for m in members})
-                    )
-                )
-            ).all()
-        }
-        for m in members:
-            m._source_id = raw_to_source.get(m.raw_poi_id)  # type: ignore[attr-defined]
+        await _attach_sources(session, members)
         priority_by_source = {
             sid: pri for sid, pri in (await session.execute(select(Source.id, Source.priority))).all()
         }
@@ -627,20 +773,7 @@ class MergeService:
         if not rows:
             return {"masters_created": 0, "members_merged": 0, **LLMUsage().as_stats()}
 
-        # Attach source_id to each row for the priority tie-breaker. Single
-        # query against raw_pois.
-        raw_to_source = {
-            rid: sid
-            for rid, sid in (
-                await session.execute(
-                    select(RawPOI.id, RawPOI.source_id).where(
-                        RawPOI.id.in_({r.raw_poi_id for r in rows})
-                    )
-                )
-            ).all()
-        }
-        for r in rows:
-            r._source_id = raw_to_source.get(r.raw_poi_id)  # type: ignore[attr-defined]
+        await _attach_sources(session, rows)
 
         # Singleton fast path — no pair, so no distance needed.
         if len(rows) == 1:
@@ -715,6 +848,20 @@ class MergeService:
             ra, rb = find(a), find(b)
             if ra != rb:
                 parent[ra] = rb
+
+        # Two copies of one source record (same Google place_id, same OSM id)
+        # are the same place by definition — join them before scoring, so they
+        # never depend on the scorer or cost a resolver call.
+        first_of_place: dict[tuple[int, str], int] = {}
+        for r in rows:
+            sid = getattr(r, "_source_id", None)
+            spid = getattr(r, "_source_poi_id", None)
+            if sid and spid:
+                key = (sid, spid)
+                if key in first_of_place:
+                    union(r.id, first_of_place[key])
+                else:
+                    first_of_place[key] = r.id
 
         usage = LLMUsage()
         for i in range(len(rows)):
@@ -1018,6 +1165,7 @@ class MergeService:
         members: Sequence[ProcessedPOI],
         priority_by_source: dict[int, int],
         losers: list[uuid.UUID],
+        reason: str = "remerge",
     ) -> None:
         """Fold ``members`` and ``losers`` into ``survivor_id``, in place.
 
@@ -1106,7 +1254,11 @@ class MergeService:
                 {
                     "status": MasterPOIStatus.MERGED_AWAY.value,
                     "mid": survivor_id,
-                    "reason": f"remerged into {survivor_id}",
+                    "reason": (
+                        f"remerged into {survivor_id}"
+                        if reason == "remerge"
+                        else f"{reason} into {survivor_id}"
+                    ),
                     "losers": [str(x) for x in losers],
                 },
             )
@@ -1134,14 +1286,14 @@ class MergeService:
                         "sources": [r["source"] for r in fields["source_refs"]],
                     }
                 ),
-                "reason": "remerge",
+                "reason": reason,
             },
         )
 
         MERGE_MEMBERS.inc(len(members))
         logger.info(
-            "remerge: survivor=%s absorbed=%d members=%d name=%r",
-            survivor_id, len(losers), len(members), canonical["canonical_name"],
+            "%s: survivor=%s absorbed=%d members=%d name=%r",
+            reason, survivor_id, len(losers), len(members), canonical["canonical_name"],
         )
 
 
