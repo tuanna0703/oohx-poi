@@ -27,8 +27,27 @@ from collections import Counter
 
 from sqlalchemy import text
 
+from poi_lake.config import get_settings
 from poi_lake.db import session_scope
 from poi_lake.pipeline.dedupe import MergeService
+from poi_lake.workers.dedupe import DEDUPE_LOCK_KEY
+
+_LOCK_TTL_S = 25 * 60  # same TTL run_dedupe uses
+
+
+def _acquire_dedupe_lock():  # type: ignore[no-untyped-def]
+    """Wait (≤30 min) for any running dedupe pass, then take its lock."""
+    import time
+
+    import redis
+
+    client = redis.from_url(get_settings().redis_url)
+    for _ in range(180):
+        if client.set(DEDUPE_LOCK_KEY, "fold", ex=_LOCK_TTL_S, nx=True):
+            return client
+        print("waiting for a dedupe pass to finish…")
+        time.sleep(10)
+    raise SystemExit("dedupe lock still held after 30 min — not folding")
 
 
 async def _places_per_group(session, groups) -> list[int]:  # type: ignore[no-untyped-def]
@@ -85,13 +104,21 @@ async def main() -> None:
             print("dry run — nothing merged")
             return
 
-        stats = await svc.fold_same_place_masters(
-            session,
-            max_groups=args.max_groups,
-            max_group_size=args.max_group_size,
-            max_places=max_places,
-            commit_every=args.commit_every,
-        )
+        # Hold the dedupe pass's lock: a pass attaching a pending row to a
+        # master this run is about to retire would strand the row on a
+        # merged_away master. Stay well inside the lock's TTL.
+        lock = _acquire_dedupe_lock()
+        try:
+            stats = await svc.fold_same_place_masters(
+                session,
+                max_groups=args.max_groups,
+                max_group_size=args.max_group_size,
+                max_places=max_places,
+                commit_every=args.commit_every,
+                max_seconds=_LOCK_TTL_S - 5 * 60,
+            )
+        finally:
+            lock.delete(DEDUPE_LOCK_KEY)
     print(f"fold: {stats}")
     remaining = (
         stats["groups_available"] - stats["groups"]

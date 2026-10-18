@@ -553,6 +553,7 @@ class MergeService:
         max_group_size: int = 10,
         max_places: int | None = 1,
         commit_every: int = 100,
+        max_seconds: float | None = None,
     ) -> dict[str, int]:
         """Repair masters split over one place: fold each group from
         ``same_place_master_groups`` into its survivor.
@@ -564,7 +565,11 @@ class MergeService:
         than ``max_places`` distinct source records is skipped (97.8% of groups
         held exactly one), as is any group over ``max_group_size`` masters;
         those are over-merges for ``split_master`` to look at first.
+
+        ``max_seconds`` stops between groups, so a caller holding the dedupe
+        lock can stay inside its TTL.
         """
+        started = time.monotonic()
         groups = await self.same_place_master_groups(session)
         stats = {
             "groups_available": len(groups),
@@ -579,6 +584,8 @@ class MergeService:
 
         for group in groups:
             if max_groups is not None and stats["groups"] >= max_groups:
+                break
+            if max_seconds is not None and time.monotonic() - started >= max_seconds:
                 break
             if len(group) > max_group_size:
                 stats["skipped_large"] += 1
