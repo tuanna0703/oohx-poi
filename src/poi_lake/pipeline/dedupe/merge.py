@@ -551,15 +551,19 @@ class MergeService:
         *,
         max_groups: int | None = None,
         max_group_size: int = 10,
+        max_places: int | None = 1,
         commit_every: int = 100,
     ) -> dict[str, int]:
         """Repair masters split over one place: fold each group from
         ``same_place_master_groups`` into its survivor.
 
         No scoring and no LLM — a shared Google place_id is the identity, not
-        evidence. Groups larger than ``max_group_size`` are skipped: that many
-        masters chained through shared places usually means one of them is an
-        over-merge, which ``split_master`` should look at first.
+        evidence. But groups chain: a master that already holds two places
+        links both places' groups. On production the largest group was 25
+        masters over 18 places in one mall. So a group whose members span more
+        than ``max_places`` distinct source records is skipped (97.8% of groups
+        held exactly one), as is any group over ``max_group_size`` masters;
+        those are over-merges for ``split_master`` to look at first.
         """
         groups = await self.same_place_master_groups(session)
         stats = {
@@ -568,6 +572,7 @@ class MergeService:
             "masters_merged_away": 0,
             "members_moved": 0,
             "skipped_large": 0,
+            "skipped_multi_place": 0,
         }
         src_rows = (await session.execute(select(Source.id, Source.priority))).all()
         priority_by_source = {sid: pri for sid, pri in src_rows}
@@ -579,14 +584,18 @@ class MergeService:
                 stats["skipped_large"] += 1
                 logger.warning("same-place fold: skipped group of %d masters", len(group))
                 continue
-            survivor = await self._pick_survivor(session, set(group))
-            losers = [m for m in group if m != survivor]
             members = (
                 await session.execute(
                     select(ProcessedPOI).where(ProcessedPOI.merged_into.in_(group))
                 )
             ).scalars().all()
             await _attach_sources(session, members)
+            places = {(m._source_id, m._source_poi_id) for m in members}  # type: ignore[attr-defined]
+            if max_places is not None and len(places) > max_places:
+                stats["skipped_multi_place"] += 1
+                continue
+            survivor = await self._pick_survivor(session, set(group))
+            losers = [m for m in group if m != survivor]
             await self._grow_master(
                 session, survivor, members, priority_by_source, losers,
                 reason="same-place fold",

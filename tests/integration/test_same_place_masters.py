@@ -176,3 +176,47 @@ async def test_fold_merges_masters_split_over_one_place(two_copies: dict) -> Non
     async with sm() as s:
         again = await MergeService(resolver=None).same_place_master_groups(s)
     assert not any(set(g) & before for g in again), "nothing left to fold"
+
+
+async def test_fold_skips_a_group_that_spans_two_places(two_copies: dict) -> None:
+    """A master that already holds a second place would drag it into the fold."""
+    first, second = two_copies["proc_ids"]
+    sm = get_sessionmaker()
+    async with sm() as s:
+        raw = RawPOI(
+            source_id=two_copies["source_id"],
+            source_poi_id=f"{two_copies['tag']}-other",
+            raw_payload={"name": "Bãi đậu xe"},
+            content_hash=hashlib.sha256(f"{two_copies['tag']}-other".encode()).hexdigest(),
+            location=f"SRID=4326;POINT({LNG} {LAT})",
+        )
+        s.add(raw)
+        await s.commit()
+        await s.refresh(raw)
+        other = ProcessedPOI(
+            raw_poi_id=raw.id, name_original="Bãi đậu xe", name_normalized="bãi đậu xe",
+            name_embedding=EMB, quality_score=0.8,
+            location=f"SRID=4326;POINT({LNG} {LAT})", merge_status="pending",
+        )
+        s.add(other)
+        await s.commit()
+        await s.refresh(other)
+        two_copies["proc_ids"].append(other.id)  # fixture teardown cleans it
+
+    # first + other in one master (an over-merge), second in its own.
+    async with sm() as s:
+        rows = (
+            await s.execute(select(ProcessedPOI).where(ProcessedPOI.id.in_([first, other.id])))
+        ).scalars().all()
+        for r in rows:
+            r._source_id = two_copies["source_id"]  # type: ignore[attr-defined]
+        await MergeService(resolver=None)._make_master(s, list(rows), {two_copies["source_id"]: 500})
+        await s.commit()
+    await _make_own_master(second, two_copies["source_id"])
+    before = {r[2] for r in await _state([first, second])}
+    assert len(before) == 2
+
+    async with sm() as s:
+        stats = await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
+    assert stats["skipped_multi_place"] >= 1
+    assert {r[2] for r in await _state([first, second])} == before, "left alone"

@@ -8,6 +8,10 @@ via ``MergeService.fold_same_place_masters``. No scoring and no LLM — a shared
 place_id is the identity. The survivor keeps its id; losers become
 ``merged_away`` with ``merged_into`` pointing at it.
 
+Groups chain through masters that already hold several places (one mall gave a
+25-master, 18-place group), so by default only groups covering exactly one
+place are folded.
+
 Read the numbers first, then run bounded before widening:
 
     docker compose exec -T api python scripts/fold_same_place_masters.py --dry-run
@@ -21,14 +25,37 @@ import argparse
 import asyncio
 from collections import Counter
 
+from sqlalchemy import text
+
 from poi_lake.db import session_scope
 from poi_lake.pipeline.dedupe import MergeService
+
+
+async def _places_per_group(session, groups) -> list[int]:  # type: ignore[no-untyped-def]
+    rows = (
+        await session.execute(
+            text(
+                "SELECT p.merged_into, r.source_id, r.source_poi_id "
+                "FROM processed_pois p JOIN raw_pois r ON r.id = p.raw_poi_id "
+                "WHERE p.merged_into = ANY(CAST(:ids AS UUID[]))"
+            ),
+            {"ids": [str(m) for g in groups for m in g]},
+        )
+    ).all()
+    places_of: dict = {}
+    for mid, sid, spid in rows:
+        places_of.setdefault(mid, set()).add((sid, spid))
+    return [len(set().union(*(places_of.get(m, set()) for m in g))) for g in groups]
 
 
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--max-groups", type=int, default=None)
     ap.add_argument("--max-group-size", type=int, default=10)
+    ap.add_argument(
+        "--max-places", type=int, default=1,
+        help="skip groups whose masters span more distinct places (0 = no limit)",
+    )
     ap.add_argument("--commit-every", type=int, default=100)
     ap.add_argument(
         "--dry-run",
@@ -36,19 +63,25 @@ async def main() -> None:
         help="report the groups that would be folded, then exit without merging",
     )
     args = ap.parse_args()
+    max_places = args.max_places or None
 
     svc = MergeService(resolver=None)
     async with session_scope() as session:
         if args.dry_run:
             groups = await svc.same_place_master_groups(session)
-            sizes = Counter(len(g) for g in groups)
+            places = await _places_per_group(session, groups)
+            fold = [
+                g for g, n in zip(groups, places, strict=True)
+                if len(g) <= args.max_group_size and (max_places is None or n <= max_places)
+            ]
             print(f"groups: {len(groups)}")
-            print(f"masters that would be merged away: {sum(len(g) - 1 for g in groups)}")
-            print("group size → count:", dict(sorted(sizes.items())))
-            large = [g for g in groups if len(g) > args.max_group_size]
-            print(f"groups over --max-group-size={args.max_group_size} (skipped): {len(large)}")
-            for g in large[:5]:
-                print("  e.g.", [str(m) for m in g[:6]], "…" if len(g) > 6 else "")
+            print("distinct places per group (6 = 6+):",
+                  dict(sorted(Counter(min(n, 6) for n in places).items())))
+            print("group size → count:", dict(sorted(Counter(len(g) for g in groups).items())))
+            print(f"would fold {len(fold)} groups, merging away "
+                  f"{sum(len(g) - 1 for g in fold)} masters")
+            print(f"would skip {len(groups) - len(fold)} groups "
+                  f"(> {args.max_group_size} masters or > {max_places} places)")
             print("dry run — nothing merged")
             return
 
@@ -56,10 +89,14 @@ async def main() -> None:
             session,
             max_groups=args.max_groups,
             max_group_size=args.max_group_size,
+            max_places=max_places,
             commit_every=args.commit_every,
         )
     print(f"fold: {stats}")
-    remaining = stats["groups_available"] - stats["groups"] - stats["skipped_large"]
+    remaining = (
+        stats["groups_available"] - stats["groups"]
+        - stats["skipped_large"] - stats["skipped_multi_place"]
+    )
     if remaining > 0:
         print(f"{remaining} groups remain — run again to continue")
 
