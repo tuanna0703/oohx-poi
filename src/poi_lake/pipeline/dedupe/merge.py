@@ -158,7 +158,7 @@ def _source_id_of(r: ProcessedPOI) -> int:
     return getattr(r, "_source_id", 0) or 0
 
 
-async def _identical_place_sets(
+def _identical_place_sets(
     places_of: dict[uuid.UUID, set[tuple[Any, Any]]], group: Sequence[uuid.UUID]
 ) -> bool:
     """True when every master in ``group`` holds the same set of places."""
@@ -166,7 +166,7 @@ async def _identical_place_sets(
     return bool(sets) and all(s == sets[0] for s in sets[1:]) and bool(sets[0])
 
 
-def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
+async def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
     """Stash each row's raw ``source_id`` and ``source_poi_id`` on it.
 
     ``_source_id`` feeds the priority tie-breaker; ``_source_poi_id`` lets
@@ -638,6 +638,8 @@ class MergeService:
             await _attach_sources(session, members)
             places_of: dict[uuid.UUID, set[tuple[Any, Any]]] = {}
             for m in members:
+                if m.merged_into is None:
+                    continue
                 places_of.setdefault(m.merged_into, set()).add(
                     (m._source_id, m._source_poi_id)  # type: ignore[attr-defined]
                 )
