@@ -158,12 +158,15 @@ def _source_id_of(r: ProcessedPOI) -> int:
     return getattr(r, "_source_id", 0) or 0
 
 
-def _identical_place_sets(
+def _one_master_holds_all(
     places_of: dict[uuid.UUID, set[tuple[Any, Any]]], group: Sequence[uuid.UUID]
 ) -> bool:
-    """True when every master in ``group`` holds the same set of places."""
+    """True when one master in ``group`` already holds every place the group
+    covers — folding the rest into it then joins no two places that were not
+    joined already."""
     sets = [places_of.get(m, set()) for m in group]
-    return bool(sets) and all(s == sets[0] for s in sets[1:]) and bool(sets[0])
+    union = set().union(*sets)
+    return bool(union) and any(s == union for s in sets)
 
 
 async def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
@@ -591,10 +594,12 @@ class MergeService:
         """Repair masters split over one place: fold each group from
         ``same_place_master_groups`` into its survivor.
 
-        A group over ``max_places`` is still folded when every master in it
-        holds exactly the same places: those are copies of one master (one
-        store with two Google listings, re-crawled — 5 masters for "WinMart+
-        Phố Nỷ"), so folding them joins nothing that was not already joined.
+        A group over ``max_places`` is still folded when one of its masters
+        already holds every place the group covers: the others are copies or
+        partial copies of it (one store with two Google listings, re-crawled
+        — 5 masters for "WinMart+ Phố Nỷ"), so folding joins nothing that was
+        not joined already. Groups whose places no single master holds
+        together are skipped — folding them would be a new merge.
 
         No scoring and no LLM — a shared Google place_id is the identity, not
         evidence. But groups chain: a master that already holds two places
@@ -616,7 +621,7 @@ class MergeService:
             "members_moved": 0,
             "skipped_large": 0,
             "skipped_multi_place": 0,
-            "folded_identical_multi_place": 0,
+            "folded_multi_place": 0,
         }
         src_rows = (await session.execute(select(Source.id, Source.priority))).all()
         priority_by_source = {sid: pri for sid, pri in src_rows}
@@ -645,10 +650,10 @@ class MergeService:
                 )
             places = set().union(*places_of.values())
             if max_places is not None and len(places) > max_places:
-                if not _identical_place_sets(places_of, group):
+                if not _one_master_holds_all(places_of, group):
                     stats["skipped_multi_place"] += 1
                     continue
-                stats["folded_identical_multi_place"] += 1
+                stats["folded_multi_place"] += 1
             survivor = await self._pick_survivor(session, set(group))
             losers = [m for m in group if m != survivor]
             await self._grow_master(

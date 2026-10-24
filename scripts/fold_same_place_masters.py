@@ -10,8 +10,9 @@ place_id is the identity. The survivor keeps its id; losers become
 
 Groups chain through masters that already hold several places (one mall gave a
 25-master, 18-place group), so by default only groups covering exactly one
-place are folded — plus groups whose masters all hold the very same places
-(copies of one master: one store listed twice on Google, then re-crawled).
+place are folded — plus groups where one master already holds every place
+the group covers (the rest are copies of it: one store listed twice on
+Google, then re-crawled).
 
 Read the numbers first, then run bounded before widening:
 
@@ -52,7 +53,7 @@ def _acquire_dedupe_lock():  # type: ignore[no-untyped-def]
 
 
 async def _places_per_group(session, groups) -> list[tuple[int, bool]]:  # type: ignore[no-untyped-def]
-    """(distinct places, all masters hold the same places) per group."""
+    """(distinct places, one master holds them all) per group."""
     rows = (
         await session.execute(
             text(
@@ -69,7 +70,8 @@ async def _places_per_group(session, groups) -> list[tuple[int, bool]]:  # type:
     out = []
     for g in groups:
         sets = [places_of.get(m, set()) for m in g]
-        out.append((len(set().union(*sets)), bool(sets[0]) and all(x == sets[0] for x in sets)))
+        union = set().union(*sets)
+        out.append((len(union), bool(union) and any(x == union for x in sets)))
     return out
 
 
@@ -100,7 +102,7 @@ async def main() -> None:
                 if len(g) <= args.max_group_size
                 and (max_places is None or n <= max_places or same)
             ]
-            identical = sum(
+            held = sum(
                 1 for g, (n, same) in zip(groups, places, strict=True)
                 if len(g) <= args.max_group_size and max_places is not None
                 and n > max_places and same
@@ -108,7 +110,7 @@ async def main() -> None:
             print(f"groups: {len(groups)}")
             print("distinct places per group (6 = 6+):",
                   dict(sorted(Counter(min(n, 6) for n, _ in places).items())))
-            print(f"multi-place groups of identical masters (folded): {identical}")
+            print(f"multi-place groups one master already holds (folded): {held}")
             print("group size → count:", dict(sorted(Counter(len(g) for g in groups).items())))
             print(f"would fold {len(fold)} groups, merging away "
                   f"{sum(len(g) - 1 for g in fold)} masters")

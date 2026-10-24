@@ -387,17 +387,31 @@ async def test_fold_joins_masters_holding_the_same_two_places(places_source: dic
     sm = get_sessionmaker()
     async with sm() as s:
         stats = await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
-    assert stats["folded_identical_multi_place"] >= 1
+    assert stats["folded_multi_place"] >= 1
 
     rows = await _state(places_source["made"])
     assert len({r[2] for r in rows}) == 1, "the two copies became one master"
     assert {r[2] for r in rows} <= {a, b}
 
 
-async def test_fold_skips_masters_with_different_places(places_source: dict) -> None:
+async def test_fold_joins_a_partial_copy_into_the_master_holding_all(places_source: dict) -> None:
     sid, copy_of = places_source["source_id"], places_source["copy_of"]
     a = await _master_of([await copy_of("A"), await copy_of("B")], sid)
-    b = await _master_of([await copy_of("A")], sid)
+    await _master_of([await copy_of("A")], sid)
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        stats = await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
+    assert stats["folded_multi_place"] >= 1
+
+    rows = await _state(places_source["made"])
+    assert {r[2] for r in rows} == {a}, "A alone was a copy of part of A+B"
+
+
+async def test_fold_skips_a_group_no_master_holds_whole(places_source: dict) -> None:
+    sid, copy_of = places_source["source_id"], places_source["copy_of"]
+    a = await _master_of([await copy_of("A"), await copy_of("B")], sid)
+    b = await _master_of([await copy_of("A"), await copy_of("C")], sid)
 
     sm = get_sessionmaker()
     async with sm() as s:
@@ -405,4 +419,4 @@ async def test_fold_skips_masters_with_different_places(places_source: dict) -> 
     assert stats["skipped_multi_place"] >= 1
 
     rows = await _state(places_source["made"])
-    assert {r[2] for r in rows} == {a, b}, "A+B and A alone may be different stores: left alone"
+    assert {r[2] for r in rows} == {a, b}, "folding would join B and C for the first time"
