@@ -139,9 +139,11 @@ async def list_master_pois(
     params["limit"] = per_page
     params["offset"] = offset
 
+    # id breaks ties: masters updated in one batch share confidence and
+    # updated_at, and without a total order a page walk skips and repeats rows.
     sql = text(
         _BASE_SELECT_SQL
-        + f" WHERE {where} ORDER BY confidence DESC, updated_at DESC "
+        + f" WHERE {where} ORDER BY confidence DESC, updated_at DESC, id "
         + " LIMIT :limit OFFSET :offset"
     )
     rows = (await session.execute(sql, params)).all()
@@ -342,9 +344,11 @@ async def search_master_pois(
     params["limit"] = body.per_page
     params["offset"] = offset
 
+    # id breaks ties: masters updated in one batch share confidence and
+    # updated_at, and without a total order a page walk skips and repeats rows.
     sql = text(
         _BASE_SELECT_SQL
-        + f" WHERE {where} ORDER BY confidence DESC, updated_at DESC "
+        + f" WHERE {where} ORDER BY confidence DESC, updated_at DESC, id "
         + " LIMIT :limit OFFSET :offset"
     )
     rows = (await session.execute(sql, params)).all()
