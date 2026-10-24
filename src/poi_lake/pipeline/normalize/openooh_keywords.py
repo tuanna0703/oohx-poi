@@ -21,6 +21,20 @@ from __future__ import annotations
 PROBE_CATEGORY = "_probe"
 PROBE_KEYWORDS: tuple[str, ...] = ("quán ăn", "tạp hóa", "cà phê", "cửa hàng")
 
+# Brand sweeps: a crawl_plan row whose code is "brand:<keyword>[|<keyword>…]"
+# searches for that chain by name, district by district ("WinMart+ Ba Đình,
+# Hà Nội"). Generic category keywords find a chain's stores only by chance;
+# bizmap.live needs each chain complete.
+BRAND_PREFIX = "brand:"
+
+
+def brand_keywords(code: str | None) -> list[str] | None:
+    """Search terms of a brand-sweep code, or None if ``code`` is not one."""
+    if not code or not code.startswith(BRAND_PREFIX):
+        return None
+    return [k.strip() for k in code[len(BRAND_PREFIX):].split("|") if k.strip()]
+
+
 # Codes too rare for a 5 km grid: under 0.5 raw POI per crawled cell on
 # production (2026-10-24, ~2,000 cells each; shopping malls 0.46 over 14k
 # cells, 84% of their jobs empty). They are swept once per district instead,

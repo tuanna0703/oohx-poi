@@ -8,6 +8,7 @@
   POST /admin/crawl-plan/pause          pause all pending rows
   POST /admin/crawl-plan/resume         flip paused → pending
   POST /admin/crawl-plan/reprioritize   re-apply openooh_priority, keep progress
+  POST /admin/crawl-plan/brands         add brand sweeps (one row per province)
   POST /admin/crawl-plan/retry-failed   flip failed → pending
   POST /admin/crawl-plan/tick           manual tick of the planner (debug)
 """
@@ -17,14 +18,14 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.config import get_settings
-from poi_lake.pipeline.normalize.openooh_keywords import DISTRICT_SWEEP_CODES
+from poi_lake.pipeline.normalize.openooh_keywords import BRAND_PREFIX, DISTRICT_SWEEP_CODES
 from poi_lake.seeds.openooh_priority import priority_for
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,22 @@ class InitializeResponse(BaseModel):
     skipped: int
     overwritten: int
     total: int
+
+
+class BrandSweepRequest(BaseModel):
+    brands: list[str] = Field(
+        min_length=1,
+        description='Search terms, one brand each; "A|B" searches both. E.g. "WinMart+", '
+        '"Nhà thuốc Long Châu".',
+    )
+    province_codes: list[str] | None = Field(
+        default=None, description="If null, every level=1 admin_unit."
+    )
+    priority: int = Field(
+        default=5,
+        description="Default 5 runs before tier 1 categories: a chain is cheapest to "
+        "complete by name.",
+    )
 
 
 class StatusKPIs(BaseModel):
@@ -456,6 +473,7 @@ async def reprioritize(session: AsyncSession = Depends(get_session)) -> dict[str
     codes = [
         r[0]
         for r in (await session.execute(text("SELECT DISTINCT openooh_code FROM crawl_plan"))).all()
+        if not r[0].startswith(BRAND_PREFIX)  # set by /brands, not by the category tiers
     ]
     result = await session.execute(
         text(
@@ -476,6 +494,49 @@ async def reprioritize(session: AsyncSession = Depends(get_session)) -> dict[str
     await session.commit()
     logger.info("crawl-plan reprioritized: %d rows changed", n)
     return {"rows_changed": n}
+
+
+@router.post("/brands", status_code=status.HTTP_200_OK)
+async def add_brand_sweeps(
+    payload: BrandSweepRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, int]:
+    """Add a district sweep per (province, brand), searching the chain by name.
+
+    Existing rows are left as they are, so re-posting a list only adds the
+    new brands.
+    """
+    codes = [f"{BRAND_PREFIX}{b.strip()}" for b in payload.brands if b.strip()]
+    too_long = [c for c in codes if len(c) > 50]
+    if too_long:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"over 50 chars: {too_long}")
+    provinces = payload.province_codes or [
+        r[0]
+        for r in (
+            await session.execute(text("SELECT code FROM admin_units WHERE level = 1 ORDER BY code"))
+        ).all()
+    ]
+    inserted = 0
+    for prov in provinces:
+        for code in codes:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO crawl_plan (province_code, openooh_code, cell_size_m,
+                            priority, status, sweep)
+                        VALUES (:prov, :code, 5000, :prio, 'pending', 'district')
+                        ON CONFLICT (province_code, openooh_code) DO NOTHING
+                        RETURNING id
+                        """
+                    ),
+                    {"prov": prov, "code": code, "prio": payload.priority},
+                )
+            ).first()
+            inserted += row is not None
+    await session.commit()
+    logger.info("crawl-plan brands: %d rows added for %d brands", inserted, len(codes))
+    return {"rows_added": inserted, "brands": len(codes), "provinces": len(provinces)}
 
 
 @router.post("/retry-failed", status_code=status.HTTP_200_OK)

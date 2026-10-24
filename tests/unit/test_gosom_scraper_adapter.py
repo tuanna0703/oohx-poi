@@ -122,6 +122,13 @@ async def test_place_is_added_to_every_keyword() -> None:
     assert "shopping mall Ba Đình, Hà Nội" in submit_body["keywords"]
 
 
+def test_brand_sweep_code_searches_the_brand_names() -> None:
+    assert GosomScraperAdapter._keywords_for("brand:WinMart+") == ["WinMart+"]
+    assert GosomScraperAdapter._keywords_for("brand:Long Châu|Nhà thuốc Long Châu") == [
+        "Long Châu", "Nhà thuốc Long Châu",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_polls_until_done() -> None:
     poll_count = {"n": 0}

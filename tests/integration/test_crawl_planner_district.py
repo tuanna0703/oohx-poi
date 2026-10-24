@@ -178,3 +178,50 @@ async def test_a_late_grid_job_does_not_count_as_a_district(district_row: dict) 
         await svc._update_crawl_plan(district_job, success=True, raw_count=4)
     row = await _row(plan_id)
     assert (row.cells_done, row.pois_raw) == (1, 4)
+
+
+async def test_brand_sweep_rows_search_the_chain_per_district(district_row: dict) -> None:
+    from poi_lake.api.v1.crawl_plan import BrandSweepRequest, add_brand_sweeps, reprioritize
+    from poi_lake.workers.crawl_planner import _tick
+
+    prov, name = district_row["province"], district_row["name"]
+    sm = get_sessionmaker()
+    async with sm() as s:
+        # Out of the way, so the brand row is the one the planner picks.
+        await s.execute(
+            text("UPDATE crawl_plan SET status = 'paused' WHERE id = :i"),
+            {"i": district_row["plan_id"]},
+        )
+        await s.commit()
+        res = await add_brand_sweeps(
+            BrandSweepRequest(brands=["WinMart+"], province_codes=[prov], priority=-3000), s
+        )
+        assert res["rows_added"] == 1
+        again = await add_brand_sweeps(
+            BrandSweepRequest(brands=["WinMart+"], province_codes=[prov], priority=-3000), s
+        )
+        assert again["rows_added"] == 0, "re-posting adds nothing"
+        await reprioritize(s)
+        brand_id, prio, sweep = (
+            await s.execute(
+                text(
+                    "SELECT id, priority, sweep FROM crawl_plan "
+                    "WHERE province_code = :p AND openooh_code = 'brand:WinMart+'"
+                ),
+                {"p": prov},
+            )
+        ).one()
+    assert (prio, sweep) == (-3000, "district"), "reprioritize leaves brand rows alone"
+
+    await _drain()
+    await _tick()
+    jobs = await _jobs(int(brand_id))
+    assert [(j.params["category"], j.params["place"]) for j in jobs] == [
+        ("brand:WinMart+", f"Quận Một, {name}"), ("brand:WinMart+", f"Quận Hai, {name}"),
+    ]
+    async with sm() as s:
+        await s.execute(
+            text("DELETE FROM ingestion_jobs WHERE params->>'crawl_plan_id' = :i"),
+            {"i": str(brand_id)},
+        )
+        await s.commit()

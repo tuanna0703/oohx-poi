@@ -154,6 +154,7 @@ class GosomScraperAdapter(SourceAdapter):
         from poi_lake.pipeline.normalize.openooh_keywords import (
             PROBE_CATEGORY,
             PROBE_KEYWORDS,
+            brand_keywords,
             is_openooh_code,
             keywords_for_openooh,
         )
@@ -162,6 +163,8 @@ class GosomScraperAdapter(SourceAdapter):
             return GosomScraperAdapter._default_keywords()
         if category == PROBE_CATEGORY:
             return list(PROBE_KEYWORDS)
+        if (brand := brand_keywords(category)) is not None:
+            return brand
         if is_openooh_code(category):
             return keywords_for_openooh(category)
         return [category]
