@@ -21,6 +21,39 @@ from __future__ import annotations
 PROBE_CATEGORY = "_probe"
 PROBE_KEYWORDS: tuple[str, ...] = ("quán ăn", "tạp hóa", "cà phê", "cửa hàng")
 
+# Codes too rare for a 5 km grid: under 0.5 raw POI per crawled cell on
+# production (2026-10-24, ~2,000 cells each; shopping malls 0.46 over 14k
+# cells, 84% of their jobs empty). They are swept once per district instead,
+# keywords suffixed with the district and province name — ~526 jobs a code
+# rather than ~18,600 populated cells. gosom's fast mode returns ~20 places a
+# keyword, plenty for a district's malls or cinemas.
+DISTRICT_SWEEP_CODES: frozenset[str] = frozenset({
+    "retail.shopping_malls",
+    "entertainment",
+    "entertainment.cinema",
+    "entertainment.theaters",
+    "entertainment.casinos",
+    "transit.airports",
+    "transit.subway",
+    "transit.rail",
+    "transit.ferry_terminals",
+    "transit.taxi_ride_share",
+    "sports_and_fitness.stadiums",
+    "sports_and_fitness.golf_courses",
+    "leisure.bowling_alleys",
+    "office_buildings",
+    "office_buildings.office_towers",
+    "office_buildings.coworking",
+    "outdoor.beaches",
+    "outdoor.plazas",
+    "residential.condominiums",
+    "government.libraries",
+    "farm.dairy_farms",
+    "industrial",
+    "roadside.billboards",
+    "travel.resorts",
+})
+
 # Each value is a tuple so callers can rely on stable iteration order
 # (we hand it to gosom verbatim — first keyword shows up first in the UI).
 _KEYWORDS: dict[str, tuple[str, ...]] = {

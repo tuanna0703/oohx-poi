@@ -18,6 +18,11 @@ every category row then passes over it without a job (counted in
 ``cells_skipped`` and ``cells_done``). Before this, 88% of jobs returned
 nothing — the grid spans whole province bboxes, sea and Laos included.
 
+District sweep: codes too rare for cells (``crawl_plan.sweep = 'district'``,
+see ``openooh_keywords.DISTRICT_SWEEP_CODES``) get one job per district of
+the province instead, the district's name added to the query. No probing —
+there are no cells. A province without districts is swept as a whole.
+
 Throttling shape: tick every ``CRAWL_PLANNER_MINUTES`` minutes; per tick
 budget = ``CRAWL_RATE_PER_HOUR / (60 / CRAWL_PLANNER_MINUTES)``. Default
 200/hour and 10-minute tick → 33 jobs per tick.
@@ -126,6 +131,7 @@ async def _tick() -> dict[str, Any]:
                         """
                         SELECT cp.id, cp.province_code, cp.openooh_code,
                                cp.cell_size_m, cp.cells_enqueued, cp.cells_total,
+                               cp.sweep, p.name AS province_name,
                                p.lng_min, p.lat_min, p.lng_max, p.lat_max
                         FROM crawl_plan cp
                         JOIN admin_units p ON p.code = cp.province_code
@@ -170,6 +176,34 @@ async def _tick() -> dict[str, Any]:
             for r in rows:
                 if jobs_enqueued >= budget:
                     break
+                if r.sweep == "district":
+                    units = await _district_units(session, r)
+                    offset = int(r.cells_enqueued or 0)
+                    batch = units[offset: offset + budget - jobs_enqueued]
+                    for place, lat, lng, radius in batch:
+                        to_send.append(await _insert_job(session, src_id, {
+                            "lat": lat, "lng": lng, "radius_m": radius,
+                            "category": r.openooh_code, "crawl_plan_id": int(r.id),
+                            "sweep": "district", "place": place,
+                        }))
+                    jobs_enqueued += len(batch)
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE crawl_plan SET
+                              status = 'in_progress',
+                              cells_total = :total,
+                              cells_enqueued = :pos,
+                              attempts = attempts + 1,
+                              last_attempt_at = NOW()
+                            WHERE id = :id
+                            """
+                        ),
+                        {"total": len(units), "pos": offset + len(batch), "id": int(r.id)},
+                    )
+                    picked += 1
+                    continue
+
                 bbox = [float(r.lng_min), float(r.lat_min),
                         float(r.lng_max), float(r.lat_max)]
                 size = int(r.cell_size_m or cell_size_m)
@@ -312,6 +346,40 @@ async def _insert_job(session, src_id: int, params: dict[str, Any]) -> int:  # t
             )
         ).scalar_one()
     )
+
+
+async def _district_units(session, r) -> list[tuple[str, float, float, int]]:  # type: ignore[no-untyped-def]
+    """``(place, lat, lng, radius_m)`` per district of ``r``'s province, in code
+    order (the cursor's order); the province itself when it has none.
+
+    ``radius_m`` reaches the corners of the district's bounding box, so gosom's
+    radius filter keeps everything inside it.
+    """
+    import math
+
+    from sqlalchemy import text
+
+    rows = (
+        await session.execute(
+            text(
+                "SELECT name, lng_min, lat_min, lng_max, lat_max FROM admin_units "
+                "WHERE level = 2 AND parent_code = :p AND lng_min IS NOT NULL ORDER BY code"
+            ),
+            {"p": r.province_code},
+        )
+    ).all()
+    areas = [(f"{n}, {r.province_name}", x1, y1, x2, y2) for n, x1, y1, x2, y2 in rows] or [
+        (str(r.province_name), r.lng_min, r.lat_min, r.lng_max, r.lat_max)
+    ]
+    out = []
+    for place, x1, y1, x2, y2 in areas:
+        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+        lat, lng = (y1 + y2) / 2, (x1 + x2) / 2
+        dy = (y2 - y1) / 2 * 111_320
+        dx = (x2 - x1) / 2 * 111_320 * math.cos(math.radians(lat))
+        radius = int(min(max(math.hypot(dx, dy), 2000), 100_000))
+        out.append((place, round(lat, 6), round(lng, 6), radius))
+    return out
 
 
 async def _ensure_cells(  # type: ignore[no-untyped-def]

@@ -120,7 +120,8 @@ class IngestionService:
             except (KeyError, TypeError, ValueError) as exc:
                 raise AdapterError(f"missing/invalid area params: {exc}") from exc
             category = params.get("category")
-            async for record in adapter.fetch_by_area(lat, lng, radius_m, category):
+            place = params.get("place")
+            async for record in adapter.fetch_by_area(lat, lng, radius_m, category, place=place):
                 yield record
             return
 
@@ -280,6 +281,9 @@ class IngestionService:
         except (TypeError, ValueError):
             return
 
+        # A grid job finishing after its row switched to district sweep must
+        # not count as a district (the switch restarted the row's counters).
+        sweep = params.get("sweep", "grid")
         if success:
             stmt = text(
                 """
@@ -300,10 +304,10 @@ class IngestionService:
                         THEN NOW()
                         ELSE completed_at
                     END
-                WHERE id = :pid
+                WHERE id = :pid AND sweep = :sweep
                 """
             )
-            params_sql = {"raw": int(raw_count), "pid": plan_id}
+            params_sql = {"raw": int(raw_count), "pid": plan_id, "sweep": sweep}
         else:
             stmt = text(
                 """
@@ -328,10 +332,10 @@ class IngestionService:
                         THEN NOW()
                         ELSE completed_at
                     END
-                WHERE id = :pid
+                WHERE id = :pid AND sweep = :sweep
                 """
             )
-            params_sql = {"err": error, "pid": plan_id}
+            params_sql = {"err": error, "pid": plan_id, "sweep": sweep}
         try:
             await self.session.execute(stmt, params_sql)
             await self.session.commit()

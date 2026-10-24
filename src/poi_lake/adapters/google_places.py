@@ -74,6 +74,7 @@ class GooglePlacesAdapter(SourceAdapter):
         lng: float,
         radius_m: int,
         category: str | None = None,
+        place: str | None = None,  # area name — used by text-search sources only
     ) -> AsyncIterator[RawPOIRecord]:
         body: dict[str, Any] = {
             "maxResultCount": self.NEARBY_MAX_RESULTS,

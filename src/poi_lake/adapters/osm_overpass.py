@@ -61,6 +61,7 @@ class OSMOverpassAdapter(SourceAdapter):
         lng: float,
         radius_m: int,
         category: str | None = None,
+        place: str | None = None,  # area name — used by text-search sources only
     ) -> AsyncIterator[RawPOIRecord]:
         query = self._build_area_query(lat, lng, radius_m, category)
         data = await self._post(query)

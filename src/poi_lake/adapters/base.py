@@ -80,8 +80,12 @@ class SourceAdapter(ABC):
         lng: float,
         radius_m: int,
         category: str | None = None,
+        place: str | None = None,
     ) -> AsyncIterator[RawPOIRecord]:
         """Fetch POIs within a circular area around (lat, lng).
+
+        ``place`` names the area ("Ba Đình, Hà Nội"); text-search sources add
+        it to their query, others may ignore it.
 
         Implementations are async generators. The IngestionService consumes
         the iterator and applies content-hash dedup before insert.

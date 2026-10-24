@@ -7,6 +7,7 @@
   GET  /admin/crawl-plan/failed         failed plan rows for retry
   POST /admin/crawl-plan/pause          pause all pending rows
   POST /admin/crawl-plan/resume         flip paused → pending
+  POST /admin/crawl-plan/reprioritize   re-apply openooh_priority, keep progress
   POST /admin/crawl-plan/retry-failed   flip failed → pending
   POST /admin/crawl-plan/tick           manual tick of the planner (debug)
 """
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.config import get_settings
+from poi_lake.pipeline.normalize.openooh_keywords import DISTRICT_SWEEP_CODES
 from poi_lake.seeds.openooh_priority import priority_for
 
 logger = logging.getLogger(__name__)
@@ -147,16 +149,18 @@ async def initialize(
             params = {
                 "prov": prov, "code": code,
                 "size": payload.cell_size_m, "prio": base_priority,
+                "sweep": "district" if code in DISTRICT_SWEEP_CODES else "grid",
             }
             if payload.overwrite:
                 result = await session.execute(
                     text(
                         """
                         INSERT INTO crawl_plan (province_code, openooh_code,
-                            cell_size_m, priority, status)
-                        VALUES (:prov, :code, :size, :prio, 'pending')
+                            cell_size_m, priority, status, sweep)
+                        VALUES (:prov, :code, :size, :prio, 'pending', :sweep)
                         ON CONFLICT (province_code, openooh_code) DO UPDATE SET
                             cell_size_m = EXCLUDED.cell_size_m,
+                            sweep = EXCLUDED.sweep,
                             priority = EXCLUDED.priority,
                             status = 'pending',
                             cells_total = NULL,
@@ -182,8 +186,8 @@ async def initialize(
                     text(
                         """
                         INSERT INTO crawl_plan (province_code, openooh_code,
-                            cell_size_m, priority)
-                        VALUES (:prov, :code, :size, :prio)
+                            cell_size_m, priority, sweep)
+                        VALUES (:prov, :code, :size, :prio, :sweep)
                         ON CONFLICT (province_code, openooh_code) DO NOTHING
                         RETURNING id
                         """
@@ -440,6 +444,38 @@ async def resume(session: AsyncSession = Depends(get_session)) -> dict[str, int]
     await session.commit()
     logger.info("crawl-plan resumed: %d rows", n)
     return {"resumed_rows": n}
+
+
+@router.post("/reprioritize", status_code=status.HTTP_200_OK)
+async def reprioritize(session: AsyncSession = Depends(get_session)) -> dict[str, int]:
+    """Re-apply ``openooh_priority`` (plus the priority-province boost) to every
+    row, leaving status and progress alone — unlike ``/initialize`` with
+    ``overwrite``, which resets them."""
+    settings = get_settings()
+    boosted = [c.strip() for c in settings.crawl_priority_provinces.split(",") if c.strip()]
+    codes = [
+        r[0]
+        for r in (await session.execute(text("SELECT DISTINCT openooh_code FROM crawl_plan"))).all()
+    ]
+    result = await session.execute(
+        text(
+            """
+            UPDATE crawl_plan cp
+            SET priority = v.prio
+                + CASE WHEN cp.province_code = ANY(CAST(:boosted AS TEXT[])) THEN -50 ELSE 0 END
+            FROM unnest(CAST(:codes AS TEXT[]), CAST(:prios AS INT[])) AS v(code, prio)
+            WHERE cp.openooh_code = v.code
+              AND cp.priority IS DISTINCT FROM v.prio
+                + CASE WHEN cp.province_code = ANY(CAST(:boosted AS TEXT[])) THEN -50 ELSE 0 END
+            RETURNING cp.id
+            """
+        ),
+        {"boosted": boosted, "codes": codes, "prios": [priority_for(c) for c in codes]},
+    )
+    n = len(result.all())
+    await session.commit()
+    logger.info("crawl-plan reprioritized: %d rows changed", n)
+    return {"rows_changed": n}
 
 
 @router.post("/retry-failed", status_code=status.HTTP_200_OK)

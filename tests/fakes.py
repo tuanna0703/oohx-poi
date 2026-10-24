@@ -28,6 +28,7 @@ class FakeAdapter(SourceAdapter):
         lng: float,
         radius_m: int,
         category: str | None = None,
+        place: str | None = None,  # area name — used by text-search sources only
     ) -> AsyncIterator[RawPOIRecord]:
         if self.config.extra.get("transient_fail"):
             raise AdapterTransientError("forced transient")

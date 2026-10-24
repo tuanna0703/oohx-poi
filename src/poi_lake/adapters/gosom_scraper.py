@@ -93,8 +93,14 @@ class GosomScraperAdapter(SourceAdapter):
         lng: float,
         radius_m: int,
         category: str | None = None,
+        place: str | None = None,
     ) -> AsyncIterator[RawPOIRecord]:
         keywords = self._keywords_for(category)
+        if place:
+            # A district sweep: "trung tam thuong mai Ba Đình, Hà Nội" finds
+            # the district's malls; the bare keyword at a district-sized zoom
+            # returns whatever Google ranks nearby.
+            keywords = [f"{k} {place}" for k in keywords]
         zoom = self._zoom_for_radius(radius_m)
 
         job_id = await self._submit_job(
@@ -171,7 +177,9 @@ class GosomScraperAdapter(SourceAdapter):
             return 14
         if radius_m <= 10000:
             return 13
-        return 12
+        if radius_m <= 25000:
+            return 12
+        return 11
 
     async def _submit_job(
         self,

@@ -94,6 +94,35 @@ async def test_full_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_place_is_added_to_every_keyword() -> None:
+    """A district sweep names the district in each query."""
+    submit_body: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/v1/jobs":
+            submit_body.update(json.loads(request.content))
+            return httpx.Response(201, json=SUBMIT_RESPONSE)
+        if request.method == "GET" and path.endswith("/download"):
+            return httpx.Response(200, text=SAMPLE_CSV, headers={"Content-Type": "text/csv"})
+        if request.method == "GET" and path == "/api/v1/jobs":
+            return httpx.Response(200, json=[JOB_DONE])
+        return httpx.Response(200)
+
+    adapter = _build(handler)
+    async with adapter:
+        _ = [
+            r async for r in adapter.fetch_by_area(
+                21.03, 105.83, 3000, "retail.shopping_malls", place="Ba Đình, Hà Nội"
+            )
+        ]
+
+    assert submit_body["keywords"]
+    assert all(k.endswith(" Ba Đình, Hà Nội") for k in submit_body["keywords"])
+    assert "shopping mall Ba Đình, Hà Nội" in submit_body["keywords"]
+
+
+@pytest.mark.asyncio
 async def test_polls_until_done() -> None:
     poll_count = {"n": 0}
 

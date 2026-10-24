@@ -37,6 +37,7 @@ class CrawlPlan(Base):
             "status IN ('pending','in_progress','done','failed','paused')",
             name="ck_crawl_plan_status",
         ),
+        CheckConstraint("sweep IN ('grid', 'district')", name="ck_crawl_plan_sweep"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -47,6 +48,10 @@ class CrawlPlan(Base):
     )
     openooh_code: Mapped[str] = mapped_column(String(50), nullable=False)
     cell_size_m: Mapped[int] = mapped_column(Integer, nullable=False, default=5000)
+    # 'grid': one job per populated cell. 'district': one job per district,
+    # for codes too rare for cells (openooh_keywords.DISTRICT_SWEEP_CODES);
+    # cells_* then count districts.
+    sweep: Mapped[str] = mapped_column(String(10), nullable=False, default="grid")
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     cells_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
