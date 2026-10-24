@@ -139,7 +139,7 @@ async def test_pending_copy_attaches_to_the_existing_master(two_copies: dict) ->
         )
         await s.commit()
 
-    assert attached >= 1
+    assert len(attached) >= 1
     rows = await _state([first, second])
     assert [r[1] for r in rows] == ["merged", "merged"]
     assert {r[2] for r in rows} == {master_id}, "the copy joined the master, not a new one"
@@ -269,3 +269,140 @@ async def test_fold_repoints_masters_retired_into_a_loser(two_copies: dict) -> N
         ).scalar_one()
     assert survivor == m_first
     assert target == survivor, "retired master must point straight at the survivor"
+
+
+async def test_copy_normalized_after_the_first_attach_still_joins(two_copies: dict) -> None:
+    """The race of 2026-10-21: a re-crawl normalized between the pass's first
+    attach and its clustering must not get a master of its own."""
+    first, second = two_copies["proc_ids"]
+    await _make_own_master(first, two_copies["source_id"])
+    master_id = (await _state([first]))[0][2]
+
+    svc = MergeService(resolver=None)
+    real = svc._attach_known_places
+    calls = 0
+
+    async def first_attach_misses(*a, **kw):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return set()  # the copy "was not there yet"
+        return await real(*a, **kw)
+
+    svc._attach_known_places = first_attach_misses  # type: ignore[method-assign]
+    sm = get_sessionmaker()
+    async with sm() as s:
+        stats = await svc.dedupe_pending(s, max_clusters=50)
+
+    assert calls == 2
+    assert stats["attached_to_existing"] >= 1
+    rows = await _state([first, second])
+    assert {r[2] for r in rows} == {master_id}, "no second master for the same place"
+
+
+# --- masters holding the same several places ----------------------------------
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def places_source(_isolated_engine: None) -> AsyncIterator[dict]:
+    """A source plus a helper that adds one processed copy of a named place."""
+    tag = f"multiplace-{uuid.uuid4().hex[:8]}"
+    sm = get_sessionmaker()
+    async with sm() as s:
+        src = Source(
+            code=f"src-{tag}", name="test",
+            adapter_class="tests.fakes:FakeAdapter",
+            config={}, enabled=False, priority=500,
+        )
+        s.add(src)
+        await s.commit()
+        await s.refresh(src)
+    made: list[int] = []
+
+    async def copy_of(place: str) -> int:
+        async with sm() as s:
+            raw = RawPOI(
+                source_id=src.id,
+                source_poi_id=f"{tag}-{place}",
+                raw_payload={"name": "WinMart+ Phố Nỷ", "n": len(made)},
+                content_hash=hashlib.sha256(f"{tag}{len(made)}".encode()).hexdigest(),
+                location=f"SRID=4326;POINT({LNG} {LAT})",
+            )
+            s.add(raw)
+            await s.commit()
+            await s.refresh(raw)
+            proc = ProcessedPOI(
+                raw_poi_id=raw.id,
+                name_original="WinMart+ Phố Nỷ",
+                name_normalized="winmart pho ny",
+                name_embedding=EMB,
+                brand="WinMart+",
+                quality_score=0.8,
+                location=f"SRID=4326;POINT({LNG} {LAT})",
+                merge_status="pending",
+            )
+            s.add(proc)
+            await s.commit()
+            await s.refresh(proc)
+            made.append(proc.id)
+            return proc.id
+
+    yield {"source_id": src.id, "copy_of": copy_of, "made": made}
+
+    async with sm() as s:
+        await s.execute(
+            text(
+                "DELETE FROM master_poi_history WHERE master_poi_id IN "
+                "(SELECT id FROM master_pois WHERE merged_processed_ids && CAST(:i AS BIGINT[]))"
+            ),
+            {"i": made},
+        )
+        await s.execute(text("UPDATE processed_pois SET merged_into = NULL WHERE id = ANY(:i)"), {"i": made})
+        await s.execute(
+            text("DELETE FROM master_pois WHERE merged_processed_ids && CAST(:i AS BIGINT[])"),
+            {"i": made},
+        )
+        await s.execute(text("DELETE FROM processed_pois WHERE id = ANY(:i)"), {"i": made})
+        await s.execute(text("DELETE FROM raw_pois WHERE source_poi_id LIKE :p"), {"p": f"{tag}%"})
+        await s.execute(text("DELETE FROM sources WHERE code = :c"), {"c": f"src-{tag}"})
+        await s.commit()
+
+
+async def _master_of(pids: list[int], source_id: int) -> uuid.UUID:
+    sm = get_sessionmaker()
+    async with sm() as s:
+        rows = (await s.execute(select(ProcessedPOI).where(ProcessedPOI.id.in_(pids)))).scalars().all()
+        for r in rows:
+            r._source_id = source_id  # type: ignore[attr-defined]
+        mid = await MergeService(resolver=None)._make_master(s, rows, {source_id: 500})
+        await s.commit()
+        return mid
+
+
+async def test_fold_joins_masters_holding_the_same_two_places(places_source: dict) -> None:
+    sid, copy_of = places_source["source_id"], places_source["copy_of"]
+    a = await _master_of([await copy_of("A"), await copy_of("B")], sid)
+    b = await _master_of([await copy_of("A"), await copy_of("B")], sid)
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        stats = await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
+    assert stats["folded_identical_multi_place"] >= 1
+
+    rows = await _state(places_source["made"])
+    assert len({r[2] for r in rows}) == 1, "the two copies became one master"
+    assert {r[2] for r in rows} <= {a, b}
+
+
+async def test_fold_skips_masters_with_different_places(places_source: dict) -> None:
+    sid, copy_of = places_source["source_id"], places_source["copy_of"]
+    a = await _master_of([await copy_of("A"), await copy_of("B")], sid)
+    b = await _master_of([await copy_of("A")], sid)
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        stats = await MergeService(resolver=None).fold_same_place_masters(s, commit_every=1)
+    assert stats["skipped_multi_place"] >= 1
+
+    rows = await _state(places_source["made"])
+    assert {r[2] for r in rows} == {a, b}, "A+B and A alone may be different stores: left alone"

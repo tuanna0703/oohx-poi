@@ -22,7 +22,7 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -158,7 +158,15 @@ def _source_id_of(r: ProcessedPOI) -> int:
     return getattr(r, "_source_id", 0) or 0
 
 
-async def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
+async def _identical_place_sets(
+    places_of: dict[uuid.UUID, set[tuple[Any, Any]]], group: Sequence[uuid.UUID]
+) -> bool:
+    """True when every master in ``group`` holds the same set of places."""
+    sets = [places_of.get(m, set()) for m in group]
+    return bool(sets) and all(s == sets[0] for s in sets[1:]) and bool(sets[0])
+
+
+def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
     """Stash each row's raw ``source_id`` and ``source_poi_id`` on it.
 
     ``_source_id`` feeds the priority tie-breaker; ``_source_poi_id`` lets
@@ -295,11 +303,27 @@ class MergeService:
         cluster_map = await clusterer.cluster(session, eps_meters=eps_meters, only_pending=True)
         groups = clusterer.group(cluster_map)
 
+        # The clusterer also sees rows normalized after the attach above. A
+        # re-crawl landing in that gap minted a second master for its place
+        # (14 on 2026-10-21, seconds apart). Attach again over exactly the rows
+        # being clustered; anything newer waits for the next pass.
+        late = await self._attach_known_places(
+            session, priority_by_source, only_ids=list(cluster_map)
+        )
+        if late:
+            await session.commit()
+            groups = {
+                cid: kept
+                for cid, ids in groups.items()
+                if (kept := [i for i in ids if i not in late])
+            }
+        attached |= late
+
         stats = {
             "clusters": 0,
             "masters_created": 0,
             "members_merged": 0,
-            "attached_to_existing": attached,
+            "attached_to_existing": len(attached),
             **LLMUsage().as_stats(),
             "clusters_available": len(groups),
         }
@@ -452,17 +476,24 @@ class MergeService:
         return stats
 
     async def _attach_known_places(
-        self, session: AsyncSession, priority_by_source: dict[int, int]
-    ) -> int:
+        self,
+        session: AsyncSession,
+        priority_by_source: dict[int, int],
+        *,
+        only_ids: Collection[int] | None = None,
+    ) -> set[int]:
         """Fold pending rows into the active master that already holds their
         source record (same ``source_id`` + ``source_poi_id``).
 
-        Returns the number of pending rows attached.
+        ``only_ids`` limits the check to those processed rows. Returns the ids
+        of the pending rows attached.
         """
+        if only_ids is not None and not only_ids:
+            return set()
         found = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT DISTINCT ON (p.id) p.id AS pid, mp.id AS mid
                     FROM processed_pois p
                     JOIN raw_pois r  ON r.id = p.raw_poi_id
@@ -473,9 +504,11 @@ class MergeService:
                     JOIN master_pois mp ON mp.id = p2.merged_into
                                        AND mp.status = 'active'
                     WHERE p.merge_status = 'pending'
+                    {"AND p.id = ANY(:ids)" if only_ids is not None else ""}
                     ORDER BY p.id, mp.sources_count DESC, mp.created_at ASC, mp.id ASC
                     """
-                )
+                ),
+                {"ids": list(only_ids)} if only_ids is not None else {},
             )
         ).all()
         by_master: dict[uuid.UUID, list[int]] = {}
@@ -494,7 +527,7 @@ class MergeService:
             await self._grow_master(
                 session, mid, members, priority_by_source, [], reason="same-place attach"
             )
-        return len(found)
+        return {pid for pid, _ in found}
 
     async def same_place_master_groups(
         self, session: AsyncSession
@@ -558,6 +591,11 @@ class MergeService:
         """Repair masters split over one place: fold each group from
         ``same_place_master_groups`` into its survivor.
 
+        A group over ``max_places`` is still folded when every master in it
+        holds exactly the same places: those are copies of one master (one
+        store with two Google listings, re-crawled — 5 masters for "WinMart+
+        Phố Nỷ"), so folding them joins nothing that was not already joined.
+
         No scoring and no LLM — a shared Google place_id is the identity, not
         evidence. But groups chain: a master that already holds two places
         links both places' groups. On production the largest group was 25
@@ -578,6 +616,7 @@ class MergeService:
             "members_moved": 0,
             "skipped_large": 0,
             "skipped_multi_place": 0,
+            "folded_identical_multi_place": 0,
         }
         src_rows = (await session.execute(select(Source.id, Source.priority))).all()
         priority_by_source = {sid: pri for sid, pri in src_rows}
@@ -597,10 +636,17 @@ class MergeService:
                 )
             ).scalars().all()
             await _attach_sources(session, members)
-            places = {(m._source_id, m._source_poi_id) for m in members}  # type: ignore[attr-defined]
+            places_of: dict[uuid.UUID, set[tuple[Any, Any]]] = {}
+            for m in members:
+                places_of.setdefault(m.merged_into, set()).add(
+                    (m._source_id, m._source_poi_id)  # type: ignore[attr-defined]
+                )
+            places = set().union(*places_of.values())
             if max_places is not None and len(places) > max_places:
-                stats["skipped_multi_place"] += 1
-                continue
+                if not _identical_place_sets(places_of, group):
+                    stats["skipped_multi_place"] += 1
+                    continue
+                stats["folded_identical_multi_place"] += 1
             survivor = await self._pick_survivor(session, set(group))
             losers = [m for m in group if m != survivor]
             await self._grow_master(
