@@ -420,3 +420,45 @@ async def test_fold_skips_a_group_no_master_holds_whole(places_source: dict) -> 
 
     rows = await _state(places_source["made"])
     assert {r[2] for r in rows} == {a, b}, "folding would join B and C for the first time"
+
+
+async def test_ghost_master_is_retired_into_the_master_holding_its_rows(two_copies: dict) -> None:
+    """A master whose rows all moved to another master stays active as a
+    ghost (7,860 on production, April–May 2026): retire it into the owner."""
+    first, second = two_copies["proc_ids"]
+    sid = two_copies["source_id"]
+    ghost = await _master_of([first, second], sid)
+    owner = await _master_of([first, second], sid)  # takes the rows; ghost keeps its refs
+    assert {r[2] for r in await _state([first, second])} == {owner}
+
+    sm = get_sessionmaker()
+    async with sm() as s:
+        dry = await MergeService(resolver=None).retire_ghost_masters(s, dry_run=True)
+    assert dry["merged_away"] >= 1
+    async with sm() as s:
+        status = (
+            await s.execute(text("SELECT status FROM master_pois WHERE id = :g"), {"g": ghost})
+        ).scalar_one()
+    assert status == "active", "dry run changes nothing"
+
+    async with sm() as s:
+        stats = await MergeService(resolver=None).retire_ghost_masters(s, batch_size=2)
+    assert stats["merged_away"] >= 1
+    async with sm() as s:
+        status, into = (
+            await s.execute(
+                text("SELECT status, merged_into FROM master_pois WHERE id = :g"), {"g": ghost}
+            )
+        ).one()
+        history = (
+            await s.execute(
+                text(
+                    "SELECT count(*) FROM master_poi_history "
+                    "WHERE master_poi_id = :g AND change_reason = 'ghost retire'"
+                ),
+                {"g": ghost},
+            )
+        ).scalar_one()
+    assert (status, into) == ("merged_away", owner)
+    assert history == 1
+    assert {r[3] for r in await _state([first, second])} == {"active"}, "owner untouched"

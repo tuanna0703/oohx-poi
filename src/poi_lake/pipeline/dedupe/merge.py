@@ -679,6 +679,133 @@ class MergeService:
         await session.commit()
         return stats
 
+    async def retire_ghost_masters(
+        self,
+        session: AsyncSession,
+        *,
+        dry_run: bool = False,
+        batch_size: int = 500,
+        max_seconds: float | None = None,
+    ) -> dict[str, int]:
+        """Retire active masters that no processed row points at any more.
+
+        Pipeline runs of 2026-04-27 – 05-03 moved members to another master
+        without retiring the old one: 7,860 such "ghosts" stayed ``active``
+        and served by the API, each a copy of the master that now holds its
+        rows (5 masters for "WinMart+ Phố Nỷ", one of them a ghost). A ghost
+        becomes ``merged_away`` into the active master holding most of its
+        ``merged_processed_ids``; one whose rows no active master holds is
+        ``archived``. Each retirement is written to ``master_poi_history``.
+        """
+        if dry_run:
+            total, owned_n = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT count(*), count(*) FILTER (WHERE EXISTS (
+                            SELECT 1 FROM processed_pois p
+                            JOIN master_pois o ON o.id = p.merged_into AND o.status = 'active'
+                            WHERE p.id = ANY(m.merged_processed_ids)
+                        ))
+                        FROM master_pois m
+                        WHERE m.status = 'active'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM processed_pois p WHERE p.merged_into = m.id
+                          )
+                        """
+                    )
+                )
+            ).one()
+            return {"ghosts": total, "merged_away": owned_n, "archived": total - owned_n}
+
+        started = time.monotonic()
+        stats = {"ghosts": 0, "merged_away": 0, "archived": 0}
+        while True:
+            if max_seconds is not None and time.monotonic() - started >= max_seconds:
+                break
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        WITH ghosts AS (
+                            SELECT m.id, m.merged_processed_ids
+                            FROM master_pois m
+                            WHERE m.status = 'active'
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM processed_pois p WHERE p.merged_into = m.id
+                              )
+                            ORDER BY m.id
+                            LIMIT :n
+                        ), owners AS (
+                            SELECT DISTINCT ON (g.id) g.id AS ghost, o.id AS owner
+                            FROM ghosts g
+                            JOIN processed_pois p ON p.id = ANY(g.merged_processed_ids)
+                            JOIN master_pois o ON o.id = p.merged_into AND o.status = 'active'
+                            GROUP BY g.id, o.id
+                            ORDER BY g.id, count(*) DESC, o.id
+                        )
+                        SELECT g.id, ow.owner
+                        FROM ghosts g LEFT JOIN owners ow ON ow.ghost = g.id
+                        """
+                    ),
+                    {"n": batch_size},
+                )
+            ).all()
+            if not rows:
+                break
+            stats["ghosts"] += len(rows)
+            owned = [(g, o) for g, o in rows if o is not None]
+            orphans = [g for g, o in rows if o is None]
+            stats["merged_away"] += len(owned)
+            stats["archived"] += len(orphans)
+            if owned:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE master_pois m SET
+                            status = :status,
+                            merged_into = v.owner,
+                            archived_reason = 'no members left; rows held by ' || v.owner,
+                            updated_at = NOW()
+                        FROM unnest(CAST(:ghosts AS UUID[]), CAST(:owners AS UUID[]))
+                             AS v(ghost, owner)
+                        WHERE m.id = v.ghost
+                        """
+                    ),
+                    {
+                        "status": MasterPOIStatus.MERGED_AWAY.value,
+                        "ghosts": [str(g) for g, _ in owned],
+                        "owners": [str(o) for _, o in owned],
+                    },
+                )
+            if orphans:
+                await session.execute(
+                    text(
+                        "UPDATE master_pois SET status = :status, "
+                        "archived_reason = 'no members left', updated_at = NOW() "
+                        "WHERE id = ANY(CAST(:ids AS UUID[]))"
+                    ),
+                    {"status": MasterPOIStatus.ARCHIVED.value, "ids": [str(g) for g in orphans]},
+                )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO master_poi_history (
+                        master_poi_id, version, changed_fields,
+                        previous_values, new_values, change_reason, changed_at
+                    )
+                    SELECT id, version, CAST('["status", "merged_into"]' AS JSONB),
+                           CAST('{"status": "active"}' AS JSONB),
+                           jsonb_build_object('status', status, 'merged_into', merged_into),
+                           'ghost retire', NOW()
+                    FROM master_pois WHERE id = ANY(CAST(:ids AS UUID[]))
+                    """
+                ),
+                {"ids": [str(g) for g, _ in rows]},
+            )
+            await session.commit()
+        return stats
+
     async def split_master(
         self,
         session: AsyncSession,
