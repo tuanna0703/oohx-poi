@@ -158,15 +158,26 @@ def _source_id_of(r: ProcessedPOI) -> int:
     return getattr(r, "_source_id", 0) or 0
 
 
-def _one_master_holds_all(
-    places_of: dict[uuid.UUID, set[tuple[Any, Any]]], group: Sequence[uuid.UUID]
+def _safe_multi_place_fold(
+    places_of: dict[uuid.UUID, set[tuple[Any, Any]]],
+    group: Sequence[uuid.UUID],
+    names: set[str],
 ) -> bool:
-    """True when one master in ``group`` already holds every place the group
-    covers — folding the rest into it then joins no two places that were not
-    joined already."""
+    """Whether a group spanning several places can be folded without a new merge.
+
+    * Every master holds the same places: copies of one master. Folding
+      joins nothing and loses nothing.
+    * One master holds them all and the rest hold part: fold only when every
+      record carries one name — one store listed twice on Google ("WinMart+
+      Phố Nỷ"). With differing names the big master may be an over-merge
+      (Circle K + the car park beside it) and the partial copy is the clean
+      record ``split_master`` would need; keep it.
+    """
     sets = [places_of.get(m, set()) for m in group]
     union = set().union(*sets)
-    return bool(union) and any(s == union for s in sets)
+    if not union or not any(s == union for s in sets):
+        return False
+    return all(s == union for s in sets) or len(names) == 1
 
 
 async def _attach_sources(session: AsyncSession, rows: Sequence[ProcessedPOI]) -> None:
@@ -594,12 +605,10 @@ class MergeService:
         """Repair masters split over one place: fold each group from
         ``same_place_master_groups`` into its survivor.
 
-        A group over ``max_places`` is still folded when one of its masters
-        already holds every place the group covers: the others are copies or
-        partial copies of it (one store with two Google listings, re-crawled
-        — 5 masters for "WinMart+ Phố Nỷ"), so folding joins nothing that was
-        not joined already. Groups whose places no single master holds
-        together are skipped — folding them would be a new merge.
+        A group over ``max_places`` is still folded when that merges nothing
+        new (see ``_safe_multi_place_fold``): copies of one master, or partial
+        copies of a master that is one store listed twice on Google — 5
+        masters for "WinMart+ Phố Nỷ" held its two listings.
 
         No scoring and no LLM — a shared Google place_id is the identity, not
         evidence. But groups chain: a master that already holds two places
@@ -650,7 +659,8 @@ class MergeService:
                 )
             places = set().union(*places_of.values())
             if max_places is not None and len(places) > max_places:
-                if not _one_master_holds_all(places_of, group):
+                names = {m.name_normalized for m in members}
+                if not _safe_multi_place_fold(places_of, group, names):
                     stats["skipped_multi_place"] += 1
                     continue
                 stats["folded_multi_place"] += 1

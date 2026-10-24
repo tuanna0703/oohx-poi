@@ -10,9 +10,9 @@ place_id is the identity. The survivor keeps its id; losers become
 
 Groups chain through masters that already hold several places (one mall gave a
 25-master, 18-place group), so by default only groups covering exactly one
-place are folded — plus groups where one master already holds every place
-the group covers (the rest are copies of it: one store listed twice on
-Google, then re-crawled).
+place are folded — plus multi-place groups that merge nothing new: copies
+of one master, or partial copies of a master that is one store listed twice
+on Google (all records share a name). See ``_safe_multi_place_fold``.
 
 Read the numbers first, then run bounded before widening:
 
@@ -32,6 +32,7 @@ from sqlalchemy import text
 from poi_lake.config import get_settings
 from poi_lake.db import session_scope
 from poi_lake.pipeline.dedupe import MergeService
+from poi_lake.pipeline.dedupe.merge import _safe_multi_place_fold
 from poi_lake.workers.dedupe import DEDUPE_LOCK_KEY
 
 _LOCK_TTL_S = 25 * 60  # same TTL run_dedupe uses
@@ -53,11 +54,11 @@ def _acquire_dedupe_lock():  # type: ignore[no-untyped-def]
 
 
 async def _places_per_group(session, groups) -> list[tuple[int, bool]]:  # type: ignore[no-untyped-def]
-    """(distinct places, one master holds them all) per group."""
+    """(distinct places, safe to fold despite several places) per group."""
     rows = (
         await session.execute(
             text(
-                "SELECT p.merged_into, r.source_id, r.source_poi_id "
+                "SELECT p.merged_into, r.source_id, r.source_poi_id, p.name_normalized "
                 "FROM processed_pois p JOIN raw_pois r ON r.id = p.raw_poi_id "
                 "WHERE p.merged_into = ANY(CAST(:ids AS UUID[]))"
             ),
@@ -65,13 +66,15 @@ async def _places_per_group(session, groups) -> list[tuple[int, bool]]:  # type:
         )
     ).all()
     places_of: dict = {}
-    for mid, sid, spid in rows:
+    names_of: dict = {}
+    for mid, sid, spid, name in rows:
         places_of.setdefault(mid, set()).add((sid, spid))
+        names_of.setdefault(mid, set()).add(name)
     out = []
     for g in groups:
         sets = [places_of.get(m, set()) for m in g]
-        union = set().union(*sets)
-        out.append((len(union), bool(union) and any(x == union for x in sets)))
+        names = set().union(*(names_of.get(m, set()) for m in g))
+        out.append((len(set().union(*sets)), _safe_multi_place_fold(places_of, g, names)))
     return out
 
 
@@ -110,7 +113,7 @@ async def main() -> None:
             print(f"groups: {len(groups)}")
             print("distinct places per group (6 = 6+):",
                   dict(sorted(Counter(min(n, 6) for n, _ in places).items())))
-            print(f"multi-place groups one master already holds (folded): {held}")
+            print(f"multi-place groups safe to fold: {held}")
             print("group size → count:", dict(sorted(Counter(len(g) for g in groups).items())))
             print(f"would fold {len(fold)} groups, merging away "
                   f"{sum(len(g) - 1 for g in fold)} masters")
