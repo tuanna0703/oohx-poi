@@ -15,6 +15,8 @@ Reference taxonomy: https://github.com/openooh/venue-taxonomy
 
 from __future__ import annotations
 
+from poi_lake.seeds.vn_retail_taxonomy import VN_CATEGORIES, VN_CODES
+
 # Pseudo-category for the crawl planner's cell probe: is there anything here at
 # all? The broadest everyday place types, in Vietnamese, because a probe at a
 # populated rural cell found 10 "tạp hóa" and 0 supermarkets (2026-10-18).
@@ -335,6 +337,12 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+
+# Vietnam retail & services extension: its own search terms, swept per
+# district (fast mode's ~20 places a keyword is thin for tạp hóa in a dense
+# ward, but a grid sweep is ~35,000 jobs a code — 7 days of crawling each).
+_KEYWORDS.update({c.code: c.search for c in VN_CATEGORIES})
+DISTRICT_SWEEP_CODES = DISTRICT_SWEEP_CODES | VN_CODES
 
 _DEFAULT: tuple[str, ...] = ("shop", "restaurant")
 

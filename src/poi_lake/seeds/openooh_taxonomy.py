@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+from poi_lake.seeds.vn_retail_taxonomy import VN_CATEGORIES
+
 
 class CategoryRow(TypedDict):
     code: str
@@ -138,3 +140,9 @@ TAXONOMY: list[CategoryRow] = [
     {"code": "farm.dairy_farms", "name": "Dairy Farms", "parent_code": "farm", "level": 2},
     {"code": "farm.livestock_farms", "name": "Livestock Farms", "parent_code": "farm", "level": 2},
 ]
+
+# Vietnam retail & services extension (level-2 under the parents above).
+TAXONOMY.extend(
+    {"code": c.code, "name": c.name, "parent_code": c.code.split(".", 1)[0], "level": 2}
+    for c in VN_CATEGORIES
+)

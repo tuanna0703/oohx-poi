@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from poi_lake.db.models import ProcessedPOI, RawPOI, Source
+from poi_lake.db.models import IngestionJob, ProcessedPOI, RawPOI, Source
 from poi_lake.observability import NORMALIZE_PROCESSED_INSERTED
 from poi_lake.observability.metrics import NORMALIZE_SKIPPED
 from poi_lake.pipeline.embed import EmbeddingService, get_embedding_service
@@ -52,6 +52,23 @@ class NormalizePipeline:
         self.brand_detector = brand_detector or BrandDetector()
         self.embeddings = embedding_service or get_embedding_service()
         self.quality = QualityScorer()
+        self._job_codes: dict[int, str | None] = {}
+
+    async def _searched_code(self, session: AsyncSession, job_id: int | None) -> str | None:
+        """The category the ingestion job searched for (``params.category``).
+
+        A batch of raw rows mostly shares one job, so the lookup is cached.
+        """
+        if job_id is None:
+            return None
+        cache = self._job_codes
+        if job_id not in cache:
+            job = await session.get(IngestionJob, job_id)
+            code = (job.params or {}).get("category") if job is not None else None
+            if len(cache) > 5000:
+                cache.clear()
+            cache[job_id] = code if isinstance(code, str) else None
+        return cache[job_id]
 
     async def warm_up(self, session: AsyncSession) -> None:
         """Pre-load brand cache. Call once on worker boot."""
@@ -104,8 +121,11 @@ class NormalizePipeline:
         # 2. Normalize each field.
         addr_norm_str, addr_components = self.address_norm.normalize(canonical.address or "")
         phone_e164 = self.phone_norm.normalize(canonical.phone)
-        top_cat, sub_cat = self.category_map.map_with_fallback(
-            source.code, canonical.raw_category, canonical.name
+        top_cat, sub_cat = self.category_map.classify(
+            source.code,
+            canonical.raw_category,
+            canonical.name,
+            await self._searched_code(session, raw.ingestion_job_id),
         )
 
         if not self.brand_detector._brands:  # type: ignore[attr-defined]
