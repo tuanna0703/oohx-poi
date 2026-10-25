@@ -15,6 +15,8 @@ NULL or fall back to an LLM in a later phase.
 
 from __future__ import annotations
 
+from poi_lake.seeds.vn_retail_taxonomy import VN_CATEGORIES, VN_CODES
+
 # (top, sub) — sub may be None if only the top-level is known.
 CategoryResult = tuple[str | None, str | None]
 
@@ -287,7 +289,93 @@ _NAME_INFERENCE_RULES: tuple[tuple[str, CategoryResult], ...] = (
     ("winmart", ("retail", "retail.convenience_stores")),
     ("co.opmart", ("retail", "retail.grocery")),
     ("highlands coffee", ("hospitality", "hospitality.cafes")),
+)
 
+# ---- 1b. Vietnam retail & services (seeds/vn_retail_taxonomy.py) ----------
+# After the place types above, before education: "Gara Trường Phát" and
+# "Tạp hóa Trường An" are a garage and a grocery, not schools. Whole-word
+# matches, since these terms are short ("nail", "bida", "gara").
+#
+# Ahead of them, the everyday type words Vietnamese shop names carry that
+# the place types above miss ("Quầy thuốc Kim Ngân", "ATM BIDV", "Hớt tóc
+# Hoàng Tiến", "CHXD Chính Phước", "Điện máy Thanh Vũ"); after them, the
+# broad ones that the specific terms must beat ("Siêu thị Điện Máy Xanh" is
+# electronics, "Siêu thị mẹ và bé" mother & baby, "Pet shop" not apparel).
+_TYPE_WORD_RULES: tuple[tuple[str, CategoryResult], ...] = (
+    ("quay thuoc", ("retail", "retail.pharmacy")),
+    ("thuoc tay", ("retail", "retail.pharmacy")),
+    ("tiem thuoc", ("retail", "retail.pharmacy")),
+    ("pharmacy", ("retail", "retail.pharmacy")),
+    ("atm", ("financial", "financial.atms")),
+    ("xang dau", ("retail", "retail.gas_stations")),
+    ("cay xang", ("retail", "retail.gas_stations")),
+    ("tram xang", ("retail", "retail.gas_stations")),
+    ("chxd", ("retail", "retail.gas_stations")),
+    ("dien may", ("retail", "retail.electronics")),
+    ("dien thoai", ("retail", "retail.electronics")),
+    ("dien lanh", ("retail", "retail.electronics")),
+    ("mobile", ("retail", "retail.electronics")),
+    ("laptop", ("retail", "retail.electronics")),
+    ("barber", ("health_and_beauty", "health_and_beauty.barbers")),
+    ("barbershop", ("health_and_beauty", "health_and_beauty.barbers")),
+    ("hot toc", ("health_and_beauty", "health_and_beauty.barbers")),
+    ("cat toc", ("health_and_beauty", "health_and_beauty.barbers")),
+    ("toc nam", ("health_and_beauty", "health_and_beauty.barbers")),
+    ("hair salon", ("health_and_beauty", "health_and_beauty.salons")),
+    ("beauty", ("health_and_beauty", "health_and_beauty.salons")),
+    ("tham my", ("health_and_beauty", "health_and_beauty.salons")),
+    ("spa", ("health_and_beauty", "health_and_beauty.spas")),
+    ("massage", ("health_and_beauty", "health_and_beauty.spas")),
+    ("goi dau", ("health_and_beauty", "health_and_beauty.spas")),
+    ("thoi trang", ("retail", "retail.apparel")),
+    ("quan ao", ("retail", "retail.apparel")),
+    ("fashion", ("retail", "retail.apparel")),
+    ("giay dep", ("retail", "retail.apparel")),
+    ("nha khoa", ("point_of_care", "point_of_care.dentist_offices")),
+    ("thu y", ("point_of_care", "point_of_care.veterinary_offices")),
+)
+_VN_NAME_RULES: tuple[tuple[str, CategoryResult], ...] = tuple(
+    (term, (c.code.split(".", 1)[0], c.code))
+    for c in VN_CATEGORIES
+    for term in c.name_terms
+)
+_BROAD_WORD_RULES: tuple[tuple[str, CategoryResult], ...] = (
+    ("sieu thi", ("retail", "retail.grocery")),
+    ("bach hoa", ("retail", "retail.grocery")),
+    ("mart", ("retail", "retail.convenience_stores")),
+    ("minimart", ("retail", "retail.convenience_stores")),
+    ("tien loi", ("retail", "retail.convenience_stores")),
+    # Not bare "toc": "tốc" (cao tốc, tốc hành) folds to the same word.
+    ("tiem toc", ("health_and_beauty", "health_and_beauty.salons")),
+    ("lam toc", ("health_and_beauty", "health_and_beauty.salons")),
+    ("uon toc", ("health_and_beauty", "health_and_beauty.salons")),
+    ("salon", ("health_and_beauty", "health_and_beauty.salons")),
+)
+_WORD_RULES = _TYPE_WORD_RULES + _VN_NAME_RULES + _BROAD_WORD_RULES
+
+# Searches whose results are what they searched for (see ``from_search``).
+# A value of (top, None) trusts only the level-1: a bank search also returns
+# ATMs and pawn shops, a bar search karaoke rooms and juice stalls.
+_RELIABLE_SEARCH_CODES: dict[str, CategoryResult] = {
+    **{
+        code: (code.split(".", 1)[0], code)
+        for code in (
+            "hospitality.cafes", "hospitality.restaurants", "hospitality.fast_food",
+            "retail.pharmacy", "retail.convenience_stores", "retail.grocery",
+            "retail.electronics", "retail.apparel", "retail.gas_stations",
+            "health_and_beauty.salons", "health_and_beauty.spas", "health_and_beauty.barbers",
+            "point_of_care.doctor_offices", "point_of_care.hospitals",
+            "point_of_care.dentist_offices", "point_of_care.veterinary_offices",
+            "education.schools", "education.early_learning", "education.colleges_universities",
+            "government.municipal_buildings", "travel.hotels",
+            *VN_CODES,
+        )
+    },
+    "financial.banks": ("financial", None),
+    "hospitality.bars": ("hospitality", None),
+}
+
+_INSTITUTION_RULES: tuple[tuple[str, CategoryResult], ...] = (
     # ---- 2. Education (only fires if no place-type matched) --------------
     # Composite forms first so they beat the bare ``truong`` / ``dai hoc``.
     ("truong dai hoc", ("education", "education.colleges_universities")),
@@ -375,7 +463,46 @@ class CategoryMapper:
         for needle, result in _NAME_INFERENCE_RULES:
             if needle in folded:
                 return result
+        padded = f" {folded} "
+        for term, result in _WORD_RULES:
+            if term.startswith("^"):
+                if padded.startswith(f" {term[1:]} "):
+                    return result
+            elif f" {term} " in padded:
+                return result
+        for needle, result in _INSTITUTION_RULES:
+            if needle in folded:
+                return result
         return (None, None)
+
+    def from_search(self, searched_code: str | None) -> CategoryResult:
+        """The category a gosom job searched for, when that search is trustworthy.
+
+        gosom's fast mode returns no category at all, so a place whose name
+        says nothing ("Minh Anh", "Cô Ba") is uncategorised — 80% of masters
+        on 2026-10-25. The job's keyword is a strong hint for most codes:
+        among places whose name *did* give a category, the searched top-level
+        matched it 92–99% of the time for cafés, pharmacies, convenience
+        stores, restaurants, schools, clinics, banks. Codes whose searches
+        return mixed results (nightclubs 0%, plazas 0%, malls 26%, bus
+        stations 54%) are left out, as are probes and brand sweeps.
+        """
+        if not searched_code:
+            return (None, None)
+        return _RELIABLE_SEARCH_CODES.get(searched_code, (None, None))
+
+    def classify(
+        self,
+        source_code: str,
+        raw_category: str | None,
+        name: str | None,
+        searched_code: str | None = None,
+    ) -> CategoryResult:
+        """Source category, then the name, then what the crawl searched for."""
+        result = self.map_with_fallback(source_code, raw_category, name)
+        if result == (None, None):
+            return self.from_search(searched_code)
+        return result
 
     def map_with_fallback(
         self, source_code: str, raw_category: str | None, name: str | None

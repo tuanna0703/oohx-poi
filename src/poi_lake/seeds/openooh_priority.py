@@ -18,6 +18,8 @@ without touching their progress.
 
 from __future__ import annotations
 
+from poi_lake.seeds.vn_retail_taxonomy import FIRST, VN_CODES
+
 # Tier 1 — chains and everyday foot traffic; what bizmap shows first.
 TIER_1: list[str] = [
     "retail.convenience_stores",
@@ -81,16 +83,24 @@ TIER_3: list[str] = [
     "farm",
 ]
 
+# Vietnam retail & services codes the user asked for first go 6–9: after the
+# brand sweeps (5), before tier 1. The rest of that extension joins tier 2.
+FIRST_VN: list[str] = list(FIRST)
+TIER_2.extend(c for c in sorted(VN_CODES) if c not in FIRST)
+
 DEFAULT_PRIORITY = 300
 
 
 def priority_map() -> dict[str, int]:
     """Return ``{openooh_code: priority}`` — lower number = sooner.
 
-    Tier 1 starts at 10, tier 2 at 100, tier 3 at 500; unlisted codes get
+    The first Vietnam retail codes get 6–9, tier 1 starts at 10, tier 2 at
+    100, tier 3 at 500; unlisted codes get
     ``DEFAULT_PRIORITY`` (between tiers 2 and 3).
     """
     out: dict[str, int] = {}
+    for i, code in enumerate(FIRST_VN):
+        out[code] = 6 + i
     for i, code in enumerate(TIER_1):
         out[code] = 10 + i
     for i, code in enumerate(TIER_2):
