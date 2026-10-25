@@ -442,6 +442,10 @@ class CategoryMapper:
             return self.map_osm(raw_category)
         if source_code == "gosom_scraper":
             return self.map_gosom(raw_category)
+        if source_code == "chain_websites":
+            # The chain's own OpenOOH pair, "retail|retail.grocery".
+            top, _, sub = (raw_category or "").partition("|")
+            return (top, sub) if top and sub.startswith(f"{top}.") else (None, None)
         # Phase 2b will additionally register: vietmap, foody.
         return (None, None)
 

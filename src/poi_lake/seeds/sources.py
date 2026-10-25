@@ -55,6 +55,15 @@ SOURCES: list[dict[str, Any]] = [
         "enabled": False,
         "priority": 30,
     },
+    {
+        # Reads our own chain_stores table, never the web: on from the start.
+        "code": "chain_websites",
+        "name": "Chains' own store lists",
+        "adapter_class": "poi_lake.adapters.chain_websites:ChainWebsitesAdapter",
+        "config": {"rate_limit_per_second": 100},
+        "enabled": True,
+        "priority": 25,
+    },
     # ── NOT IMPLEMENTED ───────────────────────────────────────────────────
     # The two sources below are seeded as placeholders: their config is
     # sketched, but poi_lake/adapters/{vietmap,foody}.py do not exist yet.

@@ -2,6 +2,8 @@
 
 ``refresh_winmart`` sweeps WinMart's store list, matches it to masters, then
 queues ``crawl_winmart_store`` for every store in ``CATALOG_WINMART_REGIONS``.
+``refresh_bachhoaxanh`` reads Bách Hoá Xanh's store list and matches it; that
+chain has no product crawl.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
 about one request a second against winmart.vn.
 """
@@ -15,14 +17,18 @@ from datetime import UTC, datetime, timedelta
 
 import dramatiq
 
-from poi_lake.catalog.winmart import CHAIN, CatalogTransientError, WinMartClient
+from poi_lake.catalog import bachhoaxanh
+from poi_lake.catalog.base import CatalogTransientError
+from poi_lake.catalog.chains import CHAINS
+from poi_lake.catalog.winmart import CHAIN, WinMartClient
 from poi_lake.config import get_settings
 from poi_lake.db import session_scope
 from poi_lake.services import catalog
 
 logger = logging.getLogger(__name__)
 
-WINMART_BRANDS = ("WinMart+", "WinMart")
+WINMART_BRANDS = CHAINS[CHAIN].brands
+BHX_BRANDS = CHAINS[bachhoaxanh.CHAIN].brands
 # Below this share of the chain's published total, a sweep is treated as
 # partial and retires no store.
 COMPLETE_SHARE = 0.97
@@ -73,6 +79,26 @@ async def _refresh_winmart(crawl_items: bool) -> dict:
         crawl_winmart_store.send(code)
     return {"published_total": total, "seeds": len(seeds), **sweep, **saved, **matched,
             "complete": complete, "queued": len(codes)}
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=2, min_backoff=600_000, time_limit=60 * 60_000)
+def refresh_bachhoaxanh() -> None:
+    result = _run(_refresh_bachhoaxanh)
+    logger.info("bachhoaxanh refresh: %r", result)
+
+
+async def _refresh_bachhoaxanh() -> dict:
+    now = datetime.now(UTC)
+    async with bachhoaxanh.BHXClient(min_interval_s=get_settings().catalog_min_interval_s) as bhx:
+        stores, stats = await bhx.all_stores()
+    # Every province answered: a store no longer listed has closed.
+    complete = stats["failed_provinces"] == 0 and bool(stores)
+    async with session_scope() as s:
+        saved = await catalog.save_stores(
+            s, bachhoaxanh.CHAIN, stores.values(), now=now, complete=complete
+        )
+        matched = await catalog.match_stores(s, bachhoaxanh.CHAIN, BHX_BRANDS)
+    return {**stats, **saved, **matched, "complete": complete}
 
 
 @dramatiq.actor(queue_name="catalog", max_retries=3, min_backoff=60_000, time_limit=30 * 60_000)

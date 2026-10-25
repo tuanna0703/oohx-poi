@@ -144,7 +144,7 @@ def _start_crawl_planner_scheduler() -> None:
 
 
 def _start_catalog_scheduler() -> None:
-    """Send ``refresh_winmart`` once per ``CATALOG_REFRESH_HOURS`` window.
+    """Send every chain's refresh once per ``CATALOG_REFRESH_HOURS`` window.
 
     Same Redis-SETNX coordination as the schedulers above, but checked
     hourly: deploys restart the worker more often than once a week, so a
@@ -167,8 +167,9 @@ def _start_catalog_scheduler() -> None:
             window = int(time.time() // interval_s)
             key = f"poi-lake:scheduler:catalog:{window}"
             if r.set(key, "1", ex=interval_s + 10, nx=True):
-                from poi_lake.workers.catalog import refresh_winmart
+                from poi_lake.workers.catalog import refresh_bachhoaxanh, refresh_winmart
                 refresh_winmart.send()
+                refresh_bachhoaxanh.send()
                 logger.info("scheduled catalog refresh enqueued (window=%d)", window)
         except Exception:
             logger.exception("catalog scheduler tick failed")

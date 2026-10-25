@@ -26,6 +26,7 @@ class QualityFactors:
 # Picked from operational experience with each source on VN data.
 _SOURCE_RELIABILITY: dict[str, float] = {
     "google_places": 0.90,
+    "chain_websites": 0.85,  # the chain's own list of its stores
     "vietmap": 0.80,
     "gosom_scraper": 0.75,
     "osm_overpass": 0.70,
