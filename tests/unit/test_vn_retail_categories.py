@@ -31,6 +31,8 @@ from poi_lake.seeds.vn_retail_taxonomy import FIRST, VN_CATEGORIES, VN_CODES
         ("Tiệm vàng Kim Hoàn", "retail.jewelry"),
         ("Dịch Vụ Cầm Đồ Thế Anh", "financial.pawn_shops"),
         ("Chợ Bến Thành", "retail.markets"),
+        ("CHỢ TÂN AN", "retail.markets"),
+        ("Chè Thái Ý Phương", "hospitality.milk_tea"),
         ("Trà sữa Tocotoco", "hospitality.milk_tea"),
         ("Siêu thị Mẹ và Bé Bibo", "retail.mother_baby"),
         ("Sơn Lâm petshop 2", "retail.pet_stores"),
@@ -54,14 +56,16 @@ def test_names(name: str, expected: str) -> None:
     [
         "Cao tốc Hà Nội - Hải Phòng",  # "tốc" is not "tóc"
         "Petrolimex Số 5",  # not a pet shop (brand rule aside, no "pet" word)
-        "Nhà Chó Mèo",  # "chó" is not "chợ" — only as the first word
+        "Nhà Chó Mèo",  # "chó" is not "chợ"
+        "Chó mẹt Hoàng Long",  # nor as the first word
+        "Cho thuê căn hộ 2PN",  # "cho thuê" = for rent
         "Walmart",  # "mart" whole word only
     ],
 )
 def test_no_false_hits(name: str) -> None:
     result = CategoryMapper().infer_from_name(name)
     assert result[1] not in {
-        "health_and_beauty.salons", "retail.pet_stores", "retail.convenience_stores",
+        "health_and_beauty.salons", "retail.pet_stores", "retail.convenience_stores", "retail.markets",
     }, result
 
 
