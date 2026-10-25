@@ -35,6 +35,8 @@ async def test_all_stores_pages_provinces_and_counts_failures() -> None:
         if request.url.path.endswith("/GetFull"):
             return httpx.Response(200, json={"code": 0, "data": {"provinces": [
                 {"id": 1027, "nameNew": "TP.HCM"}, {"id": 2, "name": "Hà Nội"}, {"id": 3, "name": "Lỗi"},
+                # A pre-merger province listed under its new province's id.
+                {"id": 1027, "name": "Bình Dương", "nameNew": "TP.HCM"},
             ]}})
         p = request.url.params
         province, page = int(p["provinceId"]), int(p["pageIndex"])

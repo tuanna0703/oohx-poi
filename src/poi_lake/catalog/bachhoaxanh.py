@@ -102,15 +102,18 @@ class BHXClient:
 
     async def provinces(self) -> list[tuple[int, str]]:
         data = await self._get("/Location/V2/GetFull", {})
-        out = []
+        # Since the 2025 province merger the list keeps each old province
+        # under its new province's id ("Bình Dương" → 1027, TP.HCM), so one
+        # id can appear three times.
+        out: dict[int, str] = {}
         for p in data.get("provinces") or []:
             try:
-                out.append((int(p["id"]), str(p.get("nameNew") or p.get("name") or p["id"])))
+                out.setdefault(int(p["id"]), str(p.get("nameNew") or p.get("name") or p["id"]))
             except (KeyError, TypeError, ValueError):
                 continue
         if not out:
             raise CatalogError("province list empty")
-        return out
+        return list(out.items())
 
     async def province_stores(self, province_id: int) -> tuple[list[Store], int]:
         """The province's stores and its published total (virtual ones included)."""
