@@ -11,6 +11,9 @@ The site's own front end reads ``api-crownx.winmart.vn`` without a login:
   * ``/it/api/web/v3/item/category`` — one menu's items at one store, with
     price, sale price and barcode. Only items in stock are listed.
 
+The store list holds only stores that take online orders (1,889 in 2026-10),
+not every WinMart / WinMart+ — never treat a master missing from it as closed.
+
 Be gentle: one request at a time, ``min_interval_s`` apart. We keep names,
 barcodes, prices and categories, never images or descriptions.
 """

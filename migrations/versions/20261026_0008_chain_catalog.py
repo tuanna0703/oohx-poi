@@ -4,9 +4,11 @@ Revision ID: 20261026_0008
 Revises: 20261025_0007
 Create Date: 2026-10-26
 
-``chain_stores`` is the chain's official list (WinMart publishes 1,889 stores;
-poi-lake had 4,331 masters tagged WinMart+). ``master_id`` links a store to
-the nearest master of the chain's brand, so a store page can show its items.
+``chain_stores`` is the list of stores the chain sells online from. That is
+not the whole chain: winmart.vn lists 1,889 stores you can order from, while
+poi-lake has 4,331 WinMart+ masters, most of them real stores that take no
+online orders. ``master_id`` links a store to the nearest master of the
+chain's brand, so that store's page can show its items.
 
 ``chain_store_products`` holds what a store lists online right now: a row
 means "in stock at this store", and rows vanish when the store stops listing
