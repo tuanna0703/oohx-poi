@@ -104,6 +104,28 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Chain catalogs (winmart.vn store list + products). Its own worker so a
+  # several-hour product crawl never holds up ingest/normalize/dedupe; one
+  # thread keeps it to one request at a time against the chain's site.
+  catalog:
+    image: poi-lake/api:dev
+    container_name: poi-lake-catalog
+    env_file:
+      - .env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://poi:poi@postgres:5432/poi_lake
+      REDIS_URL: redis://redis:6379/0
+    command: ["dramatiq", "poi_lake.workers", "--processes", "1", "--threads", "1", "--queues", "catalog"]
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   admin:
     build:
       context: .
