@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -35,5 +36,8 @@ def display_name(chain: str, name: str, address: str | None, store_type: str | N
         return f"Bách hoá XANH {rest or street}".strip()
     if chain == "winmart":
         brand = "WinMart+" if store_type == "VMP" else "WinMart"
-        return f"{brand} {street}".strip()
+        # "WM+ THA 520 Nguyễn Trãi" → "520 Nguyễn Trãi": the chain's own name
+        # for the store, without its brand and province code.
+        rest = re.sub(r"^WM\+?\s+[A-Z]{3}\s+", "", name).strip()
+        return f"{brand} {rest if rest and rest != name else street}".strip()
     return name
