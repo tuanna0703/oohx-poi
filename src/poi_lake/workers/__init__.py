@@ -55,6 +55,7 @@ broker = _configure_broker()
 
 # Importing the actor modules registers actors against the broker.
 from poi_lake.workers import (  # noqa: E402 - must follow broker setup
+    catalog,  # noqa: F401
     crawl_planner,  # noqa: F401
     dedupe,  # noqa: F401
     ingest,  # noqa: F401  (side-effect import)
@@ -142,6 +143,46 @@ def _start_crawl_planner_scheduler() -> None:
     logger.info("crawl planner scheduler armed: every %d minute(s)", interval_min)
 
 
+def _start_catalog_scheduler() -> None:
+    """Send ``refresh_winmart`` once per ``CATALOG_REFRESH_HOURS`` window.
+
+    Same Redis-SETNX coordination as the schedulers above, but checked
+    hourly: deploys restart the worker more often than once a week, so a
+    timer of the full interval would never fire. The admin endpoint runs a
+    refresh on demand.
+    """
+    settings = get_settings()
+    interval_h = settings.catalog_refresh_hours
+    if interval_h <= 0:
+        logger.info("catalog scheduler disabled (CATALOG_REFRESH_HOURS=0)")
+        return
+
+    interval_s = interval_h * 3600
+    check_s = min(interval_s, 3600)
+
+    def _tick() -> None:
+        try:
+            import redis as _redis
+            r = _redis.from_url(settings.redis_url)
+            window = int(time.time() // interval_s)
+            key = f"poi-lake:scheduler:catalog:{window}"
+            if r.set(key, "1", ex=interval_s + 10, nx=True):
+                from poi_lake.workers.catalog import refresh_winmart
+                refresh_winmart.send()
+                logger.info("scheduled catalog refresh enqueued (window=%d)", window)
+        except Exception:
+            logger.exception("catalog scheduler tick failed")
+        finally:
+            t = threading.Timer(check_s, _tick)
+            t.daemon = True
+            t.start()
+
+    t = threading.Timer(check_s, _tick)
+    t.daemon = True
+    t.start()
+    logger.info("catalog scheduler armed: every %d hour(s)", interval_h)
+
+
 # Only the worker process should run schedulers — the API container also
 # imports this module (admin endpoints reference run_ingestion_job).
 _invoked_as = sys.argv[0] if sys.argv else ""
@@ -159,3 +200,4 @@ if "dramatiq" in _invoked_as:
 
     _start_dedupe_scheduler()
     _start_crawl_planner_scheduler()
+    _start_catalog_scheduler()

@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     # the grid covers whole province bboxes (sea, mountains, Laos).
     crawl_probe_cells: bool = Field(default=True, alias="CRAWL_PROBE_CELLS")
 
+    # ---- Chain catalogs (store lists + products, queue ``catalog``) ----
+    # Hours between full refreshes; 0 = only on demand (admin endpoint).
+    catalog_refresh_hours: int = Field(default=168, alias="CATALOG_REFRESH_HOURS")
+    catalog_min_interval_s: float = Field(default=1.0, alias="CATALOG_MIN_INTERVAL_S")
+    # The chain's own province codes whose stores get their products crawled
+    # ("HCM,HNI"), or "*" for every store.
+    catalog_winmart_regions: str = Field(default="HCM", alias="CATALOG_WINMART_REGIONS")
+
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")
     dedupe_auto_merge_threshold: float = Field(
