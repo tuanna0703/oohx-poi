@@ -58,10 +58,13 @@ _ROWS = [
 
 
 def upgrade() -> None:
+    # Only under parents that exist: a fresh database gets its taxonomy from
+    # seed_all after the migrations (which seeds these codes too).
     insert = sa.text(
         """
         INSERT INTO openooh_categories (code, name, parent_code, level)
-        VALUES (:code, :name, :parent, 2)
+        SELECT :code, :name, :parent, 2
+        WHERE EXISTS (SELECT 1 FROM openooh_categories WHERE code = :parent)
         ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
         """
     )
