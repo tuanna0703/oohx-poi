@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -39,16 +40,26 @@ class _CompiledBrand:
 class BrandDetector:
     """Stateful: holds compiled regex + alias index. Reload via ``refresh``."""
 
+    # Brands are added at runtime (bizmap admin → PUT /api/v1/brands/{name});
+    # a long-lived worker reloads the dictionary this often.
+    MAX_AGE_S = 600
+
     def __init__(self) -> None:
         self._brands: list[_CompiledBrand] = []
+        self._loaded_at = 0.0
 
-    async def refresh(self, session: AsyncSession) -> int:
-        """Load enabled brands from DB and pre-compile patterns."""
-        rows = (
-            await session.execute(
-                select(Brand).where(Brand.enabled.is_(True))
-            )
-        ).scalars().all()
+    def is_stale(self) -> bool:
+        return not self._brands or time.monotonic() - self._loaded_at > self.MAX_AGE_S
+
+    def aliases_of(self, name: str) -> tuple[str, ...]:
+        return next((b.aliases_folded for b in self._brands if b.name == name), ())
+
+    async def refresh(self, session: AsyncSession, names: list[str] | None = None) -> int:
+        """Load enabled brands (or just ``names``) from DB and pre-compile patterns."""
+        query = select(Brand).where(Brand.enabled.is_(True))
+        if names is not None:
+            query = query.where(Brand.name.in_(names))
+        rows = (await session.execute(query)).scalars().all()
         compiled: list[_CompiledBrand] = []
         for row in rows:
             pattern = None
@@ -67,6 +78,7 @@ class BrandDetector:
                 _CompiledBrand(name=row.name, aliases_folded=aliases, pattern=pattern)
             )
         self._brands = compiled
+        self._loaded_at = time.monotonic()
         logger.info("brand detector loaded %d brands", len(compiled))
         return len(compiled)
 

@@ -703,6 +703,34 @@ async def create_api_client(
     )
 
 
+class APIClientPermissions(BaseModel):
+    permissions: list[str] = Field(min_length=1)
+
+
+@router.patch("/api-clients/{client_id}/permissions", response_model=APIClientOut)
+async def set_api_client_permissions(
+    client_id: int,
+    payload: APIClientPermissions,
+    session: AsyncSession = Depends(get_session),
+) -> APIClientOut:
+    """Replace a client's permissions (e.g. give bizmap ``write:brands``); the key is unchanged."""
+    client = await session.get(APIClient, client_id)
+    if client is None:
+        raise HTTPException(404, f"api client {client_id} not found")
+    client.permissions = sorted(set(payload.permissions))
+    await session.commit()
+    await session.refresh(client)
+    logger.info("api_client id=%d permissions=%s", client.id, client.permissions)
+    return APIClientOut(
+        id=client.id,
+        name=client.name,
+        permissions=list(client.permissions or []),
+        rate_limit_per_minute=client.rate_limit_per_minute,
+        enabled=client.enabled,
+        created_at=client.created_at,
+    )
+
+
 # ---------------------------------------------------------------- LLM breaker
 
 
