@@ -68,10 +68,15 @@ def test_street_key() -> None:
 def test_display_name_puts_the_brand_first() -> None:
     assert display_name("bachhoaxanh", "BHX 12 Lê Lợi", "BHX 12 Lê Lợi, P. Bến Thành", "BHX") == \
         "Bách hoá XANH 12 Lê Lợi"
-    assert display_name("winmart", "WM+ HCM 1.01", "72 Lê Thánh Tôn, P. Bến Nghé", "VMP") == \
-        "WinMart+ 72 Lê Thánh Tôn"
+    assert display_name("winmart", "WM+ THA 520 Nguyễn Trãi", "520 Nguyễn Trãi – Phường Phú Sơn", "VMP") == \
+        "WinMart+ 520 Nguyễn Trãi"
+    assert display_name("winmart", "WM+ DNG Sun Home 3", "Khu TM tầng 1,Block 3, Sun Home 3", "VMP") == \
+        "WinMart+ Sun Home 3"
     assert display_name("winmart", "WM HCM Bàu Cát", "Chung cư Bàu Cát II, P. 10", "VMT") == \
-        "WinMart Chung cư Bàu Cát II"
+        "WinMart Bàu Cát"
+    # A name not in the chain's usual form: fall back to the street.
+    assert display_name("winmart", "Cửa hàng 7", "72 Lê Thánh Tôn, P. Bến Nghé", "VMP") == \
+        "WinMart+ 72 Lê Thánh Tôn"
 
 
 def test_chain_websites_extractor_and_category() -> None:
