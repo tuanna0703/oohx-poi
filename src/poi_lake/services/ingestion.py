@@ -60,6 +60,10 @@ class IngestionService:
         await self._mark_running(job)
         adapter = build_adapter_for_source(source)
         stats = {"fetched": 0, "new": 0, "duplicate": 0, "errors": 0}
+        # Normalize only once the rows are committed: a message sent before
+        # the commit can reach a worker that does not see the row yet, and a
+        # raw_poi it skips is never normalized. A failed job rolls them back.
+        new_ids: list[int] = []
 
         try:
             async with adapter:
@@ -77,7 +81,7 @@ class IngestionService:
                     if new_id is not None:
                         stats["new"] += 1
                         INGEST_RAW_INSERTED.labels(source.code).inc()
-                        self._enqueue_normalize(new_id)
+                        new_ids.append(new_id)
                     else:
                         stats["duplicate"] += 1
                         INGEST_RAW_DUPLICATES.labels(source.code).inc()
@@ -92,6 +96,8 @@ class IngestionService:
             raise
 
         await self._mark_completed(job, stats)
+        for new_id in new_ids:
+            self._enqueue_normalize(new_id)
         return stats
 
     # ----------------------------------------------------------------- helpers

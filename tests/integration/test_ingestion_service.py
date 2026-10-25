@@ -100,6 +100,31 @@ async def test_basic_area_sweep_inserts_records(db_session, fake_source: Source)
     assert job.stats["new"] == 2
 
 
+async def test_normalize_is_queued_only_after_the_rows_are_committed(
+    db_session, fake_source: Source
+) -> None:
+    """A normalize message sent before the commit can reach a worker that
+    does not see the row yet, and that raw_poi is then never normalized."""
+    records = [
+        {"source_poi_id": f"fk-{i}", "raw_payload": {"name": f"S{i}"}, "location": [21.0, 105.0]}
+        for i in range(3)
+    ]
+    await _set_source_extra(db_session, fake_source.id, {"records": records})
+    job_id = await _create_job(db_session, fake_source.id, {"lat": 21.0, "lng": 105.0, "radius_m": 500})
+
+    queued: list[tuple[int, bool]] = []
+    async with get_sessionmaker()() as svc_session:
+        svc = IngestionService(svc_session)
+        svc._enqueue_normalize = lambda rid: queued.append((rid, svc_session.in_transaction()))
+        await svc.run_job(job_id)
+
+    ids = (
+        await db_session.execute(select(RawPOI.id).where(RawPOI.source_id == fake_source.id))
+    ).scalars().all()
+    assert sorted(rid for rid, _ in queued) == sorted(ids) and len(ids) == 3
+    assert not any(open_txn for _, open_txn in queued)
+
+
 async def test_idempotent_rerun_no_duplicate_rows(db_session, fake_source: Source) -> None:
     """Running the same job twice doesn't double-insert (content_hash dedup)."""
     records = [
