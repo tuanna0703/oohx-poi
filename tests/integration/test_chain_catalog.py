@@ -24,7 +24,8 @@ def _store(chain: str, code: str, lat: float, lng: float) -> Store:
 def _item(sku: str, name: str, menu: str, price: float = 10000, sale: float | None = None) -> Item:
     return Item(sku=sku, item_no=sku, name=name, brand="Vinamilk", barcode="893" + sku,
                 uom="Hộp", price=price, sale_price=sale if sale is not None else price,
-                category_path=("Thực phẩm", "Sữa"), menu=menu, seo_name=f"{sku}--s1")
+                category_path=("Thực phẩm", "Sữa"), menu=menu, seo_name=f"{sku}--s1",
+                image_url=f"https://cdn.example/{sku}.png")
 
 
 async def _drop_chain(s, chain: str) -> None:
@@ -93,6 +94,7 @@ async def test_stores_match_masters_and_list_products() -> None:
             item = body["items"][0]
             assert (item["name"], item["price"], item["sale_price"]) == ("Sữa tươi Vinamilk 180ml", 8000, 7000)
             assert item["url"].endswith("/products/1--s1?storeGroupCode=1999&storeCode=A")
+            assert item["image_url"] == "https://cdn.example/1.png"
 
             r = await c.get(f"/api/v1/master-pois/{near}/products", params={"q": "100%_"},
                             headers={"X-API-Key": key})
