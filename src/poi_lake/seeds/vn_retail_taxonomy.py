@@ -24,7 +24,7 @@ class VnCategory(NamedTuple):
     code: str
     name: str
     search: tuple[str, ...]  # gosom keywords, Vietnamese as people type them
-    name_terms: tuple[str, ...]  # accent-folded, whole words
+    name_terms: tuple[str, ...]  # whole words; accent-folded unless written with diacritics
 
 
 VN_CATEGORIES: tuple[VnCategory, ...] = (
@@ -37,7 +37,7 @@ VN_CATEGORIES: tuple[VnCategory, ...] = (
     VnCategory(
         "retail.markets", "Wet Markets (chợ)",
         ("chợ", "chợ dân sinh"),
-        ("^cho", "cho dan sinh", "cho dau moi"),
+        ("^chợ", "chợ dân sinh", "chợ đầu mối"),
     ),
     VnCategory(
         "retail.mother_baby", "Mother & Baby",
@@ -113,7 +113,7 @@ VN_CATEGORIES: tuple[VnCategory, ...] = (
     VnCategory(
         "hospitality.milk_tea", "Milk Tea & Desserts",
         ("trà sữa", "quán chè"),
-        ("tra sua", "milk tea", "tra chanh", "^che", "quan che"),
+        ("tra sua", "milk tea", "tra chanh", "^chè", "quán chè"),
     ),
     VnCategory(
         "hospitality.beer_halls", "Beer Halls (quán nhậu, bia hơi)",

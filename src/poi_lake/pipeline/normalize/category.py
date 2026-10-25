@@ -464,11 +464,15 @@ class CategoryMapper:
             if needle in folded:
                 return result
         padded = f" {folded} "
+        # A term written with diacritics is matched with them: "chợ" (market)
+        # folds to the same "cho" as "chó" (dog) and "cho thuê" (for rent).
+        accented = f" {normalize_text(name, ascii_fold=False)} "
         for term, result in _WORD_RULES:
+            text_ = padded if term.isascii() else accented
             if term.startswith("^"):
-                if padded.startswith(f" {term[1:]} "):
+                if text_.startswith(f" {term[1:]} "):
                     return result
-            elif f" {term} " in padded:
+            elif f" {term} " in text_:
                 return result
         for needle, result in _INSTITUTION_RULES:
             if needle in folded:
