@@ -26,10 +26,12 @@ import logging
 import math
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from poi_lake.catalog.base import CatalogError, CatalogTransientError, Store
 
 logger = logging.getLogger(__name__)
 
@@ -44,27 +46,6 @@ ITEM_PAGE = 500
 # REQUERY_KM to an earlier query adds little.
 ANSWER_KM = 7.0
 REQUERY_KM = 3.0
-
-
-class CatalogError(Exception):
-    """The chain's API answered something we cannot use."""
-
-
-class CatalogTransientError(CatalogError):
-    """Rate limited or temporarily down — retry later."""
-
-
-@dataclass(frozen=True, slots=True)
-class Store:
-    code: str
-    name: str
-    store_type: str  # VMT = WinMart supermarket, VMP = WinMart+
-    group_code: str
-    address: str
-    lat: float
-    lng: float
-    region_code: str  # the chain's province code: HNI, HCM, DNG…
-    raw: dict[str, Any] = field(compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +94,7 @@ def parse_store(d: dict[str, Any]) -> Store | None:
         lng=lng,
         region_code=str(d.get("provinceCode") or ""),
         raw=d,
+        phone=str(d.get("officeNumber") or "").strip() or None,
     )
 
 

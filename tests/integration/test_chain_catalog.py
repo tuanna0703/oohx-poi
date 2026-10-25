@@ -54,7 +54,7 @@ async def test_stores_match_masters_and_list_products() -> None:
         async with sm() as s:
             saved = await catalog.save_stores(s, chain, stores, now=now, complete=True)
             assert saved == {"seen": 3, "new": 3, "retired": 0}
-            assert await catalog.match_stores(s, chain, [brand]) == {"matched": 1}
+            assert await catalog.match_stores(s, chain, [brand]) == {"matched": 1, "matched_by_address": 0}
             link = (await s.execute(
                 text("SELECT store_code, match_m FROM chain_stores WHERE chain = :c AND master_id IS NOT NULL"),
                 {"c": chain},
@@ -106,3 +106,81 @@ async def test_stores_match_masters_and_list_products() -> None:
         async with sm() as s:
             await _drop_chain(s, chain)
             await _cleanup(s, tag)
+
+
+async def test_address_match_missing_stores_and_store_details() -> None:
+    sm = get_sessionmaker()
+    tag = "cat-" + uuid.uuid4().hex[:6]
+    chain, brand = f"test-{tag}", f"Brand {tag}"
+    now = datetime.now(UTC)
+
+    def store(code: str, lat: float, address: str) -> Store:
+        return Store(code=code, name=f"BHX {code}", store_type="BHX", group_code="", address=address,
+                     lat=lat, lng=106.7, region_code="1027", raw={}, open_hours="6h - 22h")
+
+    async with sm() as s:
+        key, _ = await _make_client(s, tag)
+        # ~400 m north of store P, same house number and street: one store, two pins.
+        p_master = await _seed_master(s, name="BHX P", lat=10.7036, lng=106.7, test_tag=tag, brand=brand)
+        # ~250 m from store Q, a different address: maybe Q with a misplaced pin.
+        await _seed_master(s, name="BHX other", lat=10.80225, lng=106.7, test_tag=tag, brand=brand)
+        await s.execute(
+            text("UPDATE master_pois SET canonical_address = CASE id WHEN :p THEN :pa ELSE :oa END "
+                 "WHERE archived_reason = :tag"),
+            {"p": p_master, "pa": "Số 12 Đường Lê Lợi, Phường Bến Thành, TP.HCM",
+             "oa": "88 Hai Bà Trưng, Phường Sài Gòn, TP.HCM", "tag": tag},
+        )
+        await s.commit()
+    try:
+        async with sm() as s:
+            await catalog.save_stores(s, chain, [
+                store("P", 10.7000, "BHX 12 Lê Lợi, Phường Bến Thành, TP.HCM"),
+                store("Q", 10.8000, "BHX 5 Nguyễn Huệ, Phường Sài Gòn, TP.HCM"),
+                store("R", 11.5000, "BHX 7 Trần Phú, Phường 1, TP. Vũng Tàu"),
+            ], now=now, complete=True)
+            assert await catalog.match_stores(s, chain, [brand]) == {"matched": 1, "matched_by_address": 1}
+
+            missing = await catalog.missing_stores(s, chain, [brand])
+            # Q has a master of the brand 250 m away, inside MISSING_MIN_M: not offered.
+            assert [m["store_code"] for m in missing] == ["R"]
+            assert missing[0]["nearest_m"] is None
+            assert [m["store_code"] for m in await catalog.missing_stores(s, chain, [brand], min_m=150)] == ["Q", "R"]
+
+        async with await _http() as c:
+            r = await c.get(f"/api/v1/master-pois/{p_master}/chain-stores", headers={"X-API-Key": key})
+            assert r.status_code == 200, r.text
+            [only] = r.json()["stores"]
+            assert (only["store_code"], only["open_hours"]) == ("P", "6h - 22h")
+            assert 350 < only["match_m"] < 450
+    finally:
+        async with sm() as s:
+            await _drop_chain(s, chain)
+            await _cleanup(s, tag)
+
+
+async def test_chain_websites_adapter_builds_a_raw_record() -> None:
+    from poi_lake.adapters.base import AdapterConfig, AdapterError
+    from poi_lake.adapters.chain_websites import ChainWebsitesAdapter
+
+    sm = get_sessionmaker()
+    code = "test-" + uuid.uuid4().hex[:8]
+    async with sm() as s:
+        await catalog.save_stores(s, "bachhoaxanh", [Store(
+            code=code, name="BHX 12 Lê Lợi", store_type="BHX", group_code="",
+            address="BHX 12 Lê Lợi, Phường Bến Thành, TP.HCM", lat=10.77, lng=106.70,
+            region_code="1027", raw={}, open_hours="6h - 22h",
+        )], now=datetime.now(UTC), complete=False)
+    try:
+        adapter = ChainWebsitesAdapter(AdapterConfig())
+        rec = await adapter.fetch_by_id(f"bachhoaxanh:{code}")
+        assert rec is not None and rec.location == pytest.approx((10.77, 106.70))
+        assert rec.raw_payload["name"] == "Bách hoá XANH 12 Lê Lợi"
+        assert rec.raw_payload["category"] == "retail|retail.grocery"
+        assert await adapter.fetch_by_id("bachhoaxanh:nope") is None
+        with pytest.raises(AdapterError):
+            await adapter.fetch_by_id("nochain:1")
+    finally:
+        async with sm() as s:
+            await s.execute(text("DELETE FROM chain_stores WHERE chain = 'bachhoaxanh' AND store_code = :c"),
+                            {"c": code})
+            await s.commit()

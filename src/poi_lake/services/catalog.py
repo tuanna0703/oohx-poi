@@ -2,7 +2,10 @@
 
 A chain's store is matched to the nearest active master of the chain's brand
 within ``MATCH_M``; each master goes to at most one store (closest pair
-first), so two stores in one mall do not share a pin.
+first), so two stores in one mall do not share a pin. A store left over is
+then matched to a master up to ``ADDRESS_MATCH_M`` away whose address starts
+with the same house number and street: the two lists' pins for one store can
+sit a few hundred metres apart.
 """
 
 from __future__ import annotations
@@ -17,12 +20,17 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from poi_lake.catalog.winmart import Item, Store, product_url
+from poi_lake.catalog.base import Store
+from poi_lake.catalog.winmart import Item, product_url
 from poi_lake.pipeline.normalize.text import normalize_text
 
 logger = logging.getLogger(__name__)
 
 MATCH_M = 150.0
+ADDRESS_MATCH_M = 600.0
+# A store whose nearest master of the brand is closer than this is not
+# offered as missing: it may be that master with a misplaced pin.
+MISSING_MIN_M = 300.0
 SEED_GRID_DEG = 0.03  # ~3 km: one sweep seed per cell
 BATCH = 500
 
@@ -33,6 +41,22 @@ def _point(lat: float, lng: float) -> str:
 
 def _money(v: float | None) -> int | None:
     return round(v) if v is not None else None
+
+
+_STREET_NOISE = frozenset({"bhx", "so", "duong", "d"})
+
+
+def street_key(address: str | None) -> str | None:
+    """"Số 30 Đường Đô Đốc Bảo, P. Hòa Xuân, …" → "30 do doc bao": the house
+    number and street, or None when the address does not start with a number."""
+    head = (address or "").split(",", 1)[0]
+    # "đường" folds like the name "Dương", and one list writes "Đường" where
+    # the other does not, so every such word goes: keys are only compared
+    # with each other, never shown.
+    words = [w for w in normalize_text(head).replace("-", " ").split() if w not in _STREET_NOISE]
+    if len(words) < 2 or not words[0][0].isdigit():
+        return None
+    return " ".join(words)
 
 
 async def seed_points(
@@ -72,6 +96,7 @@ async def save_stores(
             "chain": chain, "code": s.code, "name": s.name, "type": s.store_type,
             "grp": s.group_code, "addr": s.address, "region": s.region_code,
             "loc": _point(s.lat, s.lng), "raw": json.dumps(s.raw, ensure_ascii=False), "now": now,
+            "phone": s.phone, "hours": s.open_hours,
         }
         for s in stores
     ]
@@ -80,14 +105,16 @@ async def save_stores(
             text(
                 """
                 INSERT INTO chain_stores (chain, store_code, name, store_type, group_code,
-                    address, region_code, location, raw, first_seen_at, last_seen_at, active)
+                    address, region_code, location, raw, phone, open_hours,
+                    first_seen_at, last_seen_at, active)
                 VALUES (:chain, :code, :name, :type, :grp, :addr, :region,
-                    ST_GeogFromText(:loc), CAST(:raw AS jsonb), :now, :now, true)
+                    ST_GeogFromText(:loc), CAST(:raw AS jsonb), :phone, :hours, :now, :now, true)
                 ON CONFLICT (chain, store_code) DO UPDATE SET
                     name = EXCLUDED.name, store_type = EXCLUDED.store_type,
                     group_code = EXCLUDED.group_code, address = EXCLUDED.address,
                     region_code = EXCLUDED.region_code, location = EXCLUDED.location,
-                    raw = EXCLUDED.raw, last_seen_at = EXCLUDED.last_seen_at, active = true
+                    raw = EXCLUDED.raw, phone = EXCLUDED.phone, open_hours = EXCLUDED.open_hours,
+                    last_seen_at = EXCLUDED.last_seen_at, active = true
                 """
             ),
             rows[i : i + BATCH],
@@ -142,6 +169,39 @@ async def match_stores(
         taken_stores.add(store_code)
         taken_masters.add(master_id)
         links.append({"chain": chain, "code": store_code, "m": master_id, "d": float(d)})
+    by_distance = len(links)
+
+    near = (
+        await session.execute(
+            text(
+                """
+                SELECT s.store_code, s.address, m.id, m.canonical_address,
+                       ST_Distance(s.location, m.location) AS d
+                FROM chain_stores s
+                CROSS JOIN LATERAL (
+                    SELECT id, location, canonical_address FROM master_pois m
+                    WHERE m.status = 'active' AND m.brand = ANY(:brands)
+                      AND ST_DWithin(m.location, s.location, :far)
+                    ORDER BY m.location <-> s.location
+                    LIMIT 8
+                ) m
+                WHERE s.chain = :chain AND s.active AND NOT (s.store_code = ANY(:taken))
+                ORDER BY d
+                """
+            ),
+            {"chain": chain, "brands": list(brands), "far": ADDRESS_MATCH_M,
+             "taken": list(taken_stores)},
+        )
+    ).all()
+    for store_code, store_addr, master_id, master_addr, d in near:
+        if store_code in taken_stores or master_id in taken_masters:
+            continue
+        key = street_key(store_addr)
+        if key is None or key != street_key(master_addr):
+            continue
+        taken_stores.add(store_code)
+        taken_masters.add(master_id)
+        links.append({"chain": chain, "code": store_code, "m": master_id, "d": float(d)})
 
     await session.execute(
         text("UPDATE chain_stores SET master_id = NULL, match_m = NULL WHERE chain = :chain"),
@@ -156,7 +216,63 @@ async def match_stores(
             links[i : i + BATCH],
         )
     await session.commit()
-    return {"matched": len(links)}
+    return {"matched": len(links), "matched_by_address": len(links) - by_distance}
+
+
+async def missing_stores(
+    session: AsyncSession, chain: str, brands: Sequence[str], *, min_m: float = MISSING_MIN_M
+) -> list[dict[str, Any]]:
+    """Active stores the chain lists that the lake lacks: unmatched, and no
+    master of the brand within ``min_m`` (None when there is none in 5 km)."""
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT s.store_code, s.name, s.address, s.region_code, n.d
+                FROM chain_stores s
+                LEFT JOIN LATERAL (
+                    SELECT ST_Distance(s.location, m.location) AS d FROM master_pois m
+                    WHERE m.status = 'active' AND m.brand = ANY(:brands)
+                      AND ST_DWithin(m.location, s.location, 5000)
+                    ORDER BY m.location <-> s.location LIMIT 1
+                ) n ON true
+                WHERE s.chain = :chain AND s.active AND s.master_id IS NULL
+                  AND (n.d IS NULL OR n.d >= :min_m)
+                ORDER BY s.region_code, s.store_code
+                """
+            ),
+            {"chain": chain, "brands": list(brands), "min_m": min_m},
+        )
+    ).all()
+    return [
+        {"store_code": r.store_code, "name": r.name, "address": r.address,
+         "region_code": r.region_code, "nearest_m": round(r.d) if r.d is not None else None}
+        for r in rows
+    ]
+
+
+async def chain_stores_at(session: AsyncSession, master_id: Any) -> list[dict[str, Any]]:
+    """The chain stores linked to a master: what each chain's own list says."""
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT chain, store_code, name, address, phone, open_hours, match_m,
+                       items_crawled_at, items_count
+                FROM chain_stores WHERE master_id = :id AND active
+                ORDER BY match_m
+                """
+            ),
+            {"id": master_id},
+        )
+    ).all()
+    return [
+        {"chain": r.chain, "store_code": r.store_code, "name": r.name, "address": r.address,
+         "phone": r.phone, "open_hours": r.open_hours,
+         "match_m": round(r.match_m) if r.match_m is not None else None,
+         "items_crawled_at": r.items_crawled_at, "items_count": r.items_count}
+        for r in rows
+    ]
 
 
 async def summary(session: AsyncSession, chain: str, brands: Sequence[str]) -> dict[str, Any]:
