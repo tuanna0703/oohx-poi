@@ -166,7 +166,9 @@ async def _apply(session, proc_new, master_new) -> None:  # type: ignore[no-unty
             params: dict[str, object] = {}
             values = []
             for j, (pid, (top, sub)) in enumerate(chunk):
-                params[f"i{j}"], params[f"t{j}"], params[f"s{j}"] = str(pid), top, sub
+                # Native id types: asyncpg binds CAST(:i AS bigint) as int8 and
+                # refuses a str (the first production run died on that).
+                params[f"i{j}"], params[f"t{j}"], params[f"s{j}"] = pid, top, sub
                 values.append(f"(CAST(:i{j} AS {id_type}), CAST(:t{j} AS varchar), CAST(:s{j} AS varchar))")
             vals = ", ".join(values)
             await session.execute(
