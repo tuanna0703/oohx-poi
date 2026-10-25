@@ -15,7 +15,8 @@ The store list holds only stores that take online orders (1,889 in 2026-10),
 not every WinMart / WinMart+ — never treat a master missing from it as closed.
 
 Be gentle: one request at a time, ``min_interval_s`` apart. We keep names,
-barcodes, prices and categories, never images or descriptions.
+barcodes, prices, categories and the image's URL, never the image file
+or descriptions.
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ class Item:
     category_path: tuple[str, ...]
     menu: str | None
     seo_name: str | None
+    image_url: str | None = None  # on the chain's CDN; never copied
 
 
 def product_url(seo_name: str, store_code: str, group_code: str) -> str:
@@ -121,6 +123,11 @@ def _price(v: Any) -> float | None:
         return None
 
 
+def _image_url(d: dict[str, Any]) -> str | None:
+    urls = [d.get("mediaUrl")] + [m.get("mediaUrl") for m in d.get("mediaItems") or [] if isinstance(m, dict)]
+    return next((u.strip() for u in urls if isinstance(u, str) and u.strip().startswith("https://")), None)
+
+
 def parse_item(d: dict[str, Any], menu: str | None) -> Item | None:
     sku = str(d.get("sku") or "").strip()
     name = " ".join(str(d.get("name") or "").split())
@@ -141,6 +148,7 @@ def parse_item(d: dict[str, Any], menu: str | None) -> Item | None:
         category_path=path,
         menu=menu,
         seo_name=d.get("seoName") or None,
+        image_url=_image_url(d),
     )
 
 

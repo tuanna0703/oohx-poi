@@ -248,7 +248,8 @@ async def save_items(
         {
             "chain": chain, "sku": it.sku, "no": it.item_no, "name": it.name,
             "folded": normalize_text(it.name), "brand": it.brand, "barcode": it.barcode,
-            "uom": it.uom, "path": list(it.category_path), "seo": it.seo_name, "now": now,
+            "uom": it.uom, "path": list(it.category_path), "seo": it.seo_name,
+            "image": it.image_url, "now": now,
         }
         for it in items
     ]
@@ -264,14 +265,15 @@ async def save_items(
             text(
                 """
                 INSERT INTO chain_products (chain, sku, item_no, name, name_folded, brand,
-                    barcode, uom, category_path, seo_name, first_seen_at, last_seen_at)
+                    barcode, uom, category_path, seo_name, image_url, first_seen_at, last_seen_at)
                 VALUES (:chain, :sku, :no, :name, :folded, :brand, :barcode, :uom,
-                    CAST(:path AS text[]), :seo, :now, :now)
+                    CAST(:path AS text[]), :seo, :image, :now, :now)
                 ON CONFLICT (chain, sku) DO UPDATE SET
                     item_no = EXCLUDED.item_no, name = EXCLUDED.name,
                     name_folded = EXCLUDED.name_folded, brand = EXCLUDED.brand,
                     barcode = EXCLUDED.barcode, uom = EXCLUDED.uom,
                     category_path = EXCLUDED.category_path, seo_name = EXCLUDED.seo_name,
+                    image_url = COALESCE(EXCLUDED.image_url, chain_products.image_url),
                     last_seen_at = EXCLUDED.last_seen_at
                 """
             ),
@@ -388,6 +390,7 @@ async def master_products(
             text(
                 f"""
                 SELECT p.sku, p.name, p.brand, p.barcode, p.uom, p.category_path, p.seo_name,
+                       p.image_url,
                        sp.menu, sp.price, sp.sale_price
                 {join} WHERE {where}
                 ORDER BY sp.menu, p.name, p.sku
@@ -405,6 +408,7 @@ async def master_products(
             "sale_price": int(r.sale_price) if r.sale_price is not None else None,
             "url": product_url(r.seo_name, store.store_code, store.group_code or "")
             if r.seo_name else None,
+            "image_url": r.image_url,
         }
         for r in rows
     ]

@@ -40,13 +40,16 @@ def test_parse_store_and_item() -> None:
         {"sku": "10196814G1", "itemNo": "10196814", "name": "Sữa tươi  Meiji 946ml",
          "brandName": "MEIJI", "barcode": "8850329003624", "uomName": "Gói",
          "price": 92000.0, "salePrice": 85000.0, "mch1Name": "Thực phẩm",
-         "mch2Name": "Bơ, sữa, trứng", "mch3Name": "", "seoName": "meiji--s10196814"},
+         "mch2Name": "Bơ, sữa, trứng", "mch3Name": "", "seoName": "meiji--s10196814",
+         "mediaUrl": "", "mediaItems": [{"mediaUrl": "https://cdn.example/meiji.png"}]},
         "Sữa các loại",
     )
     assert it is not None
     assert it.name == "Sữa tươi Meiji 946ml"
     assert it.category_path == ("Thực phẩm", "Bơ, sữa, trứng")
     assert (it.price, it.sale_price, it.menu) == (92000.0, 85000.0, "Sữa các loại")
+    assert it.image_url == "https://cdn.example/meiji.png"
+    assert parse_item({"sku": "1", "name": "x", "mediaUrl": "http://plain.example/a.png"}, None).image_url is None
     assert parse_item({"sku": "", "name": "x"}, None) is None
     assert product_url("a--s1", "2AC9", "1999") == (
         "https://winmart.vn/products/a--s1?storeGroupCode=1999&storeCode=2AC9"
