@@ -27,6 +27,7 @@ from poi_lake.api.deps import get_session, require_admin
 from poi_lake.config import get_settings
 from poi_lake.pipeline.normalize.openooh_keywords import BRAND_PREFIX, DISTRICT_SWEEP_CODES
 from poi_lake.seeds.openooh_priority import priority_for
+from poi_lake.services import brands as brand_service
 
 logger = logging.getLogger(__name__)
 
@@ -506,37 +507,13 @@ async def add_brand_sweeps(
     Existing rows are left as they are, so re-posting a list only adds the
     new brands.
     """
-    codes = [f"{BRAND_PREFIX}{b.strip()}" for b in payload.brands if b.strip()]
-    too_long = [c for c in codes if len(c) > 50]
-    if too_long:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"over 50 chars: {too_long}")
-    provinces = payload.province_codes or [
-        r[0]
-        for r in (
-            await session.execute(text("SELECT code FROM admin_units WHERE level = 1 ORDER BY code"))
-        ).all()
-    ]
-    inserted = 0
-    for prov in provinces:
-        for code in codes:
-            row = (
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO crawl_plan (province_code, openooh_code, cell_size_m,
-                            priority, status, sweep)
-                        VALUES (:prov, :code, 5000, :prio, 'pending', 'district')
-                        ON CONFLICT (province_code, openooh_code) DO NOTHING
-                        RETURNING id
-                        """
-                    ),
-                    {"prov": prov, "code": code, "prio": payload.priority},
-                )
-            ).first()
-            inserted += row is not None
+    try:
+        result = await brand_service.add_brand_sweeps(session, payload.brands, payload.province_codes, payload.priority)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     await session.commit()
-    logger.info("crawl-plan brands: %d rows added for %d brands", inserted, len(codes))
-    return {"rows_added": inserted, "brands": len(codes), "provinces": len(provinces)}
+    logger.info("crawl-plan brands: %s", result)
+    return result
 
 
 @router.post("/retry-failed", status_code=status.HTTP_200_OK)

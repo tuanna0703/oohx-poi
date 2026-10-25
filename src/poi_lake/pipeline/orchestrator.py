@@ -128,7 +128,7 @@ class NormalizePipeline:
             await self._searched_code(session, raw.ingestion_job_id),
         )
 
-        if not self.brand_detector._brands:  # type: ignore[attr-defined]
+        if self.brand_detector.is_stale():
             await self.brand_detector.refresh(session)
         brand_match = self.brand_detector.detect(canonical.name)
 
