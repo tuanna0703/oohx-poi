@@ -29,6 +29,8 @@ def _item(sku: str, name: str, menu: str, price: float = 10000, sale: float | No
 
 
 async def _drop_chain(s, chain: str) -> None:
+    await s.execute(text("DELETE FROM chain_price_changes WHERE chain = :c"), {"c": chain})
+    await s.execute(text("DELETE FROM chain_price_daily WHERE chain = :c"), {"c": chain})
     await s.execute(text("DELETE FROM chain_store_products WHERE chain = :c"), {"c": chain})
     await s.execute(text("DELETE FROM chain_products WHERE chain = :c"), {"c": chain})
     await s.execute(text("DELETE FROM chain_stores WHERE chain = :c"), {"c": chain})
@@ -120,6 +122,36 @@ async def test_stores_match_masters_and_list_products() -> None:
             assert r.json()["master_ids"] == [], "sku 2 left store A's listing"
             r = await c.get("/api/v1/catalog/Bad Chain/stores", headers={"X-API-Key": key})
             assert r.status_code == 422
+
+        # Price history: a change is kept, an unchanged price is not, a product
+        # leaving the listing is noted as no price; the day's summary follows.
+        async with sm() as s:
+            await catalog.save_items(
+                s, chain, "A", [_item("1", "Sữa tươi Vinamilk 180ml", "Sữa các loại", 8000, 6500)],
+                answered_menus=["Sữa các loại"], now=later + timedelta(hours=2),
+            )
+            await catalog.save_items(
+                s, chain, "A", [_item("1", "Sữa tươi Vinamilk 180ml", "Sữa các loại", 8000, 6500)],
+                answered_menus=["Sữa các loại"], now=later + timedelta(hours=3),
+            )
+            hist = (await s.execute(
+                text("SELECT sku, sale_price FROM chain_price_changes WHERE chain = :c ORDER BY sku, seen_at"),
+                {"c": chain},
+            )).all()
+            assert [(h.sku, h.sale_price) for h in hist] == [
+                ("1", 7000), ("1", 6500), ("2", 10000), ("2", None), ("3", 10000)
+            ]
+            today = datetime.now(UTC).date()
+            assert await catalog.snapshot_prices(s, chain, today, later + timedelta(hours=4)) == 2
+            assert await catalog.snapshot_prices(s, chain, today, later + timedelta(hours=5)) == 2, "upsert"
+
+        async with await _http() as c:
+            r = await c.get(f"/api/v1/catalog/{chain}/products/1/prices", headers={"X-API-Key": key})
+            assert r.status_code == 200, r.text
+            day = r.json()["days"][-1]
+            assert (day["stores"], day["on_sale"], day["mode_price"], day["regular_price"]) == (1, 1, 6500, 8000)
+            r = await c.get(f"/api/v1/catalog/{chain}/products/nope/prices", headers={"X-API-Key": key})
+            assert r.status_code == 404
     finally:
         async with sm() as s:
             await _drop_chain(s, chain)

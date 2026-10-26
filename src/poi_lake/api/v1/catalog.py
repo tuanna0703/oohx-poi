@@ -8,6 +8,7 @@
                                                one row per product (read:master)
   GET  /api/v1/catalog/{chain}/stores          masters whose store lists products,
                                                or one product (?sku=) (read:master)
+  GET  /api/v1/catalog/{chain}/products/{sku}/prices   its daily prices (read:master)
   GET  /api/v1/admin/catalog/{chain}           store list, matching and crawl progress
   POST /api/v1/admin/catalog/{chain}/refresh   read the chain's store list now
   GET  /api/v1/admin/catalog/{chain}/missing   stores the chain lists that the lake lacks
@@ -95,6 +96,20 @@ async def chain_listed_stores(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     return {"chain": chain, "sku": sku, "master_ids": await catalog.chain_listed_masters(session, chain, sku)}
+
+
+@router.get("/catalog/{chain}/products/{sku}/prices", dependencies=[Depends(require_permission("read:master"))])
+async def product_prices(
+    chain: str = Path(pattern=CHAIN_CODE),
+    sku: str = Path(max_length=60),
+    days: int = Query(default=90, ge=1, le=730),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """The product's daily prices across the chain's stores, oldest first."""
+    out = await catalog.product_prices(session, chain, sku, days)
+    if out is None:
+        raise HTTPException(404, "unknown product")
+    return out
 
 
 @admin_router.get("/{chain}")

@@ -1,7 +1,9 @@
 """Chain catalog actors — queue ``catalog``, consumed by the ``catalog`` worker.
 
 ``refresh_winmart`` sweeps WinMart's store list, matches it to masters, then
-queues ``crawl_winmart_store`` for every store in ``CATALOG_WINMART_REGIONS``.
+queues ``crawl_winmart_store`` for every store in ``CATALOG_WINMART_REGIONS``;
+``queue_winmart_items`` re-reads those stores' listings alone (daily, for
+prices), and ``snapshot_prices`` folds today's prices into ``chain_price_daily``.
 ``refresh_bachhoaxanh`` reads Bách Hoá Xanh's store list and matches it; that
 chain has no product crawl.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
@@ -14,6 +16,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import dramatiq
 
@@ -33,6 +36,7 @@ BHX_BRANDS = CHAINS[bachhoaxanh.CHAIN].brands
 # partial and retires no store.
 COMPLETE_SHARE = 0.97
 RECRAWL_AFTER = timedelta(hours=12)
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def _run[T](coro_fn: Callable[[], Awaitable[T]]) -> T:
@@ -79,6 +83,38 @@ async def _refresh_winmart(crawl_items: bool) -> dict:
         crawl_winmart_store.send(code)
     return {"published_total": total, "seeds": len(seeds), **sweep, **saved, **matched,
             "complete": complete, "queued": len(codes)}
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=2, time_limit=10 * 60_000)
+def queue_winmart_items() -> None:
+    """Re-read every store's listing (prices) without sweeping the store list."""
+    result = _run(_queue_winmart_items)
+    logger.info("winmart items queued: %r", result)
+
+
+async def _queue_winmart_items() -> dict:
+    async with session_scope() as s:
+        codes = await catalog.stores_to_crawl(s, CHAIN, regions())
+    for code in codes:
+        crawl_winmart_store.send(code)
+    return {"queued": len(codes)}
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=2, time_limit=10 * 60_000)
+def snapshot_prices() -> None:
+    """Today's price summary per product (Vietnam's calendar day), upserted."""
+    result = _run(_snapshot_prices)
+    logger.info("price snapshot: %r", result)
+
+
+async def _snapshot_prices() -> dict:
+    now = datetime.now(UTC)
+    day = now.astimezone(VN_TZ).date()
+    out = {}
+    async with session_scope() as s:
+        for chain in (c.code for c in CHAINS.values() if c.products):
+            out[chain] = await catalog.snapshot_prices(s, chain, day, now)
+    return {"day": day.isoformat(), **out}
 
 
 @dramatiq.actor(queue_name="catalog", max_retries=2, min_backoff=600_000, time_limit=60 * 60_000)

@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     # Hours between full refreshes; 0 = only on demand (admin endpoint).
     catalog_refresh_hours: int = Field(default=168, alias="CATALOG_REFRESH_HOURS")
     catalog_min_interval_s: float = Field(default=1.0, alias="CATALOG_MIN_INTERVAL_S")
+    # Product listings (prices) are re-read this often, between full refreshes.
+    catalog_items_hours: int = Field(default=24, alias="CATALOG_ITEMS_HOURS")
     # The chain's own province codes whose stores get their products crawled
     # ("HCM,HNI"), or "*" for every store.
     catalog_winmart_regions: str = Field(default="HCM", alias="CATALOG_WINMART_REGIONS")
