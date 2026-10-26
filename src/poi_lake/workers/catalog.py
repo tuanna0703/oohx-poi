@@ -117,6 +117,22 @@ async def _snapshot_prices() -> dict:
     return {"day": day.isoformat(), **out}
 
 
+@dramatiq.actor(queue_name="catalog", max_retries=2, time_limit=30 * 60_000)
+def build_daily_report() -> None:
+    """Yesterday's report (Vietnam's calendar), written into daily_reports."""
+    result = _run(_build_daily_report)
+    logger.info("daily report: %r", result)
+
+
+async def _build_daily_report() -> dict:
+    from poi_lake.services import reports
+
+    day = datetime.now(VN_TZ).date() - timedelta(days=1)
+    async with session_scope() as s:
+        m = await reports.build_daily_report(s, day)
+    return {"day": day.isoformat(), "new_masters": m["crawl"]["new_masters"]}
+
+
 @dramatiq.actor(queue_name="catalog", max_retries=2, min_backoff=600_000, time_limit=60 * 60_000)
 def refresh_bachhoaxanh() -> None:
     result = _run(_refresh_bachhoaxanh)
