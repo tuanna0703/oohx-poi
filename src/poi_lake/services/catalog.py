@@ -702,7 +702,8 @@ async def product_prices(session: AsyncSession, chain: str, sku: str, days: int)
     product = (
         await session.execute(
             text(
-                "SELECT sku, name, brand, uom, image_url FROM chain_products WHERE chain = :c AND sku = :s"
+                "SELECT sku, name, brand, uom, image_url, barcode, category_path "
+                "FROM chain_products WHERE chain = :c AND sku = :s"
             ),
             {"c": chain, "s": sku},
         )
@@ -723,10 +724,39 @@ async def product_prices(session: AsyncSession, chain: str, sku: str, days: int)
         )
     ).all()
     money = lambda v: int(v) if v is not None else None  # noqa: E731
+    today = (
+        await session.execute(
+            text(
+                """
+                SELECT count(*) AS stores,
+                       mode() WITHIN GROUP (ORDER BY COALESCE(sp.sale_price, sp.price)) AS price,
+                       mode() WITHIN GROUP (ORDER BY sp.price) AS regular,
+                       min(COALESCE(sp.sale_price, sp.price)) AS min_price,
+                       max(COALESCE(sp.sale_price, sp.price)) AS max_price,
+                       count(*) FILTER (WHERE sp.sale_price < sp.price) AS on_sale,
+                       (SELECT count(DISTINCT x.store_code) FROM chain_store_products x
+                        JOIN chain_stores xs ON xs.chain = x.chain AND xs.store_code = x.store_code AND xs.active
+                        WHERE x.chain = :c) AS stores_total
+                FROM chain_store_products sp
+                JOIN chain_stores s ON s.chain = sp.chain AND s.store_code = sp.store_code AND s.active
+                WHERE sp.chain = :c AND sp.sku = :s
+                """
+            ),
+            {"c": chain, "s": sku},
+        )
+    ).one()
+    from poi_lake.services.catalog_brands import product_owner
+
+    path = list(product.category_path or [])
     return {
         "chain": chain,
         "product": {"sku": product.sku, "name": product.name, "brand": product.brand,
-                    "uom": product.uom, "image_url": product.image_url},
+                    "uom": product.uom, "image_url": product.image_url, "barcode": product.barcode,
+                    "category": path[-1] if path else None, "owner": product_owner(product.brand)},
+        "today": {"stores": int(today.stores), "stores_total": int(today.stores_total or 0),
+                  "price": money(today.price), "regular": money(today.regular),
+                  "min_price": money(today.min_price), "max_price": money(today.max_price),
+                  "on_sale": int(today.on_sale)},
         "days": [
             {"day": r.day.isoformat(), "stores": r.stores, "on_sale": r.on_sale,
              "min_price": money(r.min_price), "mode_price": money(r.mode_price),
