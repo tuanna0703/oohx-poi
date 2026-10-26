@@ -144,7 +144,9 @@ def _start_crawl_planner_scheduler() -> None:
 
 
 def _start_catalog_scheduler() -> None:
-    """Send every chain's refresh once per ``CATALOG_REFRESH_HOURS`` window.
+    """Send every chain's refresh once per ``CATALOG_REFRESH_HOURS`` window,
+    re-read product listings once per ``CATALOG_ITEMS_HOURS`` window (0 = off),
+    and refresh today's price summary every hour.
 
     Same Redis-SETNX coordination as the schedulers above, but checked
     hourly: deploys restart the worker more often than once a week, so a
@@ -158,19 +160,36 @@ def _start_catalog_scheduler() -> None:
         return
 
     interval_s = interval_h * 3600
+    items_s = max(settings.catalog_items_hours, 0) * 3600
     check_s = min(interval_s, 3600)
 
     def _tick() -> None:
         try:
             import redis as _redis
             r = _redis.from_url(settings.redis_url)
-            window = int(time.time() // interval_s)
+            now = time.time()
+            window = int(now // interval_s)
             key = f"poi-lake:scheduler:catalog:{window}"
+            from poi_lake.workers.catalog import (
+                queue_winmart_items,
+                refresh_bachhoaxanh,
+                refresh_winmart,
+                snapshot_prices,
+            )
             if r.set(key, "1", ex=interval_s + 10, nx=True):
-                from poi_lake.workers.catalog import refresh_bachhoaxanh, refresh_winmart
                 refresh_winmart.send()
                 refresh_bachhoaxanh.send()
                 logger.info("scheduled catalog refresh enqueued (window=%d)", window)
+            # Prices: every store's listing re-read each items window, and
+            # today's summary refreshed every hour so it follows the crawl.
+            if items_s:
+                iw = int(now // items_s)
+                if r.set(f"poi-lake:scheduler:catalog-items:{iw}", "1", ex=items_s + 10, nx=True):
+                    queue_winmart_items.send()
+                    logger.info("scheduled catalog items crawl enqueued (window=%d)", iw)
+            hw = int(now // 3600)
+            if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):
+                snapshot_prices.send()
         except Exception:
             logger.exception("catalog scheduler tick failed")
         finally:

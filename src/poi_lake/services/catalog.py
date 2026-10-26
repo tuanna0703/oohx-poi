@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -395,6 +395,23 @@ async def save_items(
             ),
             products[i : i + BATCH],
         )
+    # Price history first, while chain_store_products still holds the last prices.
+    for i in range(0, len(listings), BATCH):
+        await session.execute(
+            text(
+                """
+                INSERT INTO chain_price_changes (chain, store_code, sku, price, sale_price, seen_at)
+                SELECT :chain, :store, :sku, :price, :sale, :now
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM chain_store_products
+                    WHERE chain = :chain AND store_code = :store AND sku = :sku
+                      AND price IS NOT DISTINCT FROM CAST(:price AS numeric)
+                      AND sale_price IS NOT DISTINCT FROM CAST(:sale AS numeric)
+                )
+                """
+            ),
+            listings[i : i + BATCH],
+        )
     for i in range(0, len(listings), BATCH):
         await session.execute(
             text(
@@ -408,13 +425,19 @@ async def save_items(
             ),
             listings[i : i + BATCH],
         )
+    # Gone from the listing: delete, and note it in the history as no price.
     gone = (
         await session.execute(
             text(
                 """
-                DELETE FROM chain_store_products
-                WHERE chain = :chain AND store_code = :store AND seen_at < :now
-                  AND (menu IS NULL OR menu = ANY(:menus))
+                WITH gone AS (
+                    DELETE FROM chain_store_products
+                    WHERE chain = :chain AND store_code = :store AND seen_at < :now
+                      AND (menu IS NULL OR menu = ANY(:menus))
+                    RETURNING sku
+                )
+                INSERT INTO chain_price_changes (chain, store_code, sku, price, sale_price, seen_at)
+                SELECT :chain, :store, sku, NULL, NULL, :now FROM gone
                 """
             ),
             {"chain": chain, "store": store_code, "now": now, "menus": list(answered_menus)},
@@ -630,3 +653,79 @@ async def chain_listed_masters(session: AsyncSession, chain: str, sku: str | Non
         sql = f"SELECT DISTINCT s.master_id FROM chain_store_products sp {_LISTED} WHERE sp.chain = :chain AND sp.sku = :sku"
     rows = (await session.execute(text(sql), {"chain": chain, "sku": sku})).scalars()
     return sorted(str(m) for m in rows)
+
+
+# A listing older than this no longer counts in the day's summary: its store
+# has not been read for over a week.
+DAILY_FRESH_DAYS = 8
+
+
+async def snapshot_prices(session: AsyncSession, chain: str, day: date, now: datetime) -> int:
+    """Upsert ``day``'s row per product: prices across the chain's stores now."""
+    n = (
+        await session.execute(
+            text(
+                """
+                INSERT INTO chain_price_daily
+                    (chain, sku, day, stores, on_sale, min_price, mode_price, max_price, regular_price)
+                SELECT sp.chain, sp.sku, :day, count(*),
+                       count(*) FILTER (WHERE sp.sale_price < sp.price),
+                       min(COALESCE(sp.sale_price, sp.price)),
+                       mode() WITHIN GROUP (ORDER BY COALESCE(sp.sale_price, sp.price)),
+                       max(COALESCE(sp.sale_price, sp.price)),
+                       mode() WITHIN GROUP (ORDER BY sp.price)
+                FROM chain_store_products sp
+                JOIN chain_stores s ON s.chain = sp.chain AND s.store_code = sp.store_code AND s.active
+                WHERE sp.chain = :chain AND sp.seen_at > :since
+                  AND COALESCE(sp.sale_price, sp.price) IS NOT NULL
+                GROUP BY sp.chain, sp.sku
+                ON CONFLICT (chain, sku, day) DO UPDATE SET
+                    stores = EXCLUDED.stores, on_sale = EXCLUDED.on_sale,
+                    min_price = EXCLUDED.min_price, mode_price = EXCLUDED.mode_price,
+                    max_price = EXCLUDED.max_price, regular_price = EXCLUDED.regular_price
+                """
+            ),
+            {"chain": chain, "day": day, "since": now - timedelta(days=DAILY_FRESH_DAYS)},
+        )
+    ).rowcount
+    await session.commit()
+    return int(n or 0)
+
+
+async def product_prices(session: AsyncSession, chain: str, sku: str, days: int) -> dict[str, Any] | None:
+    """A product's daily prices across the chain for the last ``days`` days."""
+    product = (
+        await session.execute(
+            text(
+                "SELECT sku, name, brand, uom, image_url FROM chain_products WHERE chain = :c AND sku = :s"
+            ),
+            {"c": chain, "s": sku},
+        )
+    ).one_or_none()
+    if product is None:
+        return None
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT day, stores, on_sale, min_price, mode_price, max_price, regular_price
+                FROM chain_price_daily
+                WHERE chain = :c AND sku = :s AND day > CURRENT_DATE - CAST(:days AS int)
+                ORDER BY day
+                """
+            ),
+            {"c": chain, "s": sku, "days": days},
+        )
+    ).all()
+    money = lambda v: int(v) if v is not None else None  # noqa: E731
+    return {
+        "chain": chain,
+        "product": {"sku": product.sku, "name": product.name, "brand": product.brand,
+                    "uom": product.uom, "image_url": product.image_url},
+        "days": [
+            {"day": r.day.isoformat(), "stores": r.stores, "on_sale": r.on_sale,
+             "min_price": money(r.min_price), "mode_price": money(r.mode_price),
+             "max_price": money(r.max_price), "regular_price": money(r.regular_price)}
+            for r in rows
+        ],
+    }
