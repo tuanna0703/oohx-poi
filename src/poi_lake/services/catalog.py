@@ -529,3 +529,104 @@ async def master_products(
         for r in rows
     ]
     return out
+
+
+# Stores whose listing counts: linked to a master and read at least once.
+_LISTED = (
+    "JOIN chain_stores s ON s.chain = sp.chain AND s.store_code = sp.store_code "
+    "AND s.active AND s.master_id IS NOT NULL AND s.items_crawled_at IS NOT NULL"
+)
+
+
+async def chain_products(
+    session: AsyncSession,
+    chain: str,
+    *,
+    q: str | None = None,
+    menu: str | None = None,
+    page: int = 1,
+    per_page: int = 50,
+) -> dict[str, Any]:
+    """What a chain's stores list online, one row per product: how many of
+    its stores list it and the lowest and highest price seen."""
+    key = {"chain": chain}
+    stores = int(
+        (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM chain_stores WHERE chain = :chain AND active "
+                    "AND master_id IS NOT NULL AND items_crawled_at IS NOT NULL"
+                ),
+                key,
+            )
+        ).scalar_one()
+    )
+    menus = [
+        {"name": m, "count": int(n)}
+        for m, n in (
+            await session.execute(
+                text(
+                    f"SELECT sp.menu, count(DISTINCT sp.sku) FROM chain_store_products sp {_LISTED} "
+                    "WHERE sp.chain = :chain AND sp.menu IS NOT NULL "
+                    "GROUP BY sp.menu ORDER BY count(DISTINCT sp.sku) DESC, sp.menu"
+                ),
+                key,
+            )
+        ).all()
+    ]
+    clauses = ["sp.chain = :chain"]
+    params: dict[str, Any] = dict(key)
+    if menu:
+        clauses.append("sp.menu = :menu")
+        params["menu"] = menu
+    for j, token in enumerate(normalize_text(q or "").split()[:6]):
+        clauses.append(f"p.name_folded LIKE :t{j} ESCAPE '\'")
+        params[f"t{j}"] = "%" + _LIKE_ESCAPE.sub(r"\\1", token) + "%"
+    where = " AND ".join(clauses)
+    join = f"FROM chain_store_products sp {_LISTED} JOIN chain_products p ON p.chain = sp.chain AND p.sku = sp.sku"
+    total = int(
+        (await session.execute(text(f"SELECT count(DISTINCT sp.sku) {join} WHERE {where}"), params)).scalar_one()
+    )
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                SELECT p.sku, p.name, p.brand, p.uom, p.image_url, min(sp.menu) AS menu,
+                       count(DISTINCT sp.store_code) AS stores,
+                       min(COALESCE(sp.sale_price, sp.price)) AS min_price,
+                       max(COALESCE(sp.sale_price, sp.price)) AS max_price
+                {join} WHERE {where}
+                GROUP BY p.sku, p.name, p.brand, p.uom, p.image_url
+                ORDER BY count(DISTINCT sp.store_code) DESC, p.name, p.sku
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {**params, "limit": per_page, "offset": (page - 1) * per_page},
+        )
+    ).all()
+    return {
+        "chain": chain, "stores": stores, "menus": menus, "total": total,
+        "page": page, "per_page": per_page,
+        "items": [
+            {
+                "sku": r.sku, "name": r.name, "brand": r.brand, "uom": r.uom,
+                "image_url": r.image_url, "menu": r.menu, "stores": int(r.stores),
+                "min_price": int(r.min_price) if r.min_price is not None else None,
+                "max_price": int(r.max_price) if r.max_price is not None else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+async def chain_listed_masters(session: AsyncSession, chain: str, sku: str | None = None) -> list[str]:
+    """Masters whose chain store lists products online — or lists ``sku``."""
+    if sku is None:
+        sql = (
+            "SELECT DISTINCT master_id FROM chain_stores WHERE chain = :chain AND active "
+            "AND master_id IS NOT NULL AND items_crawled_at IS NOT NULL"
+        )
+    else:
+        sql = f"SELECT DISTINCT s.master_id FROM chain_store_products sp {_LISTED} WHERE sp.chain = :chain AND sp.sku = :sku"
+    rows = (await session.execute(text(sql), {"chain": chain, "sku": sku})).scalars()
+    return sorted(str(m) for m in rows)

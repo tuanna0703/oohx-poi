@@ -4,6 +4,10 @@
                                                lists online (read:master)
   GET  /api/v1/master-pois/{id}/chain-stores   what each chain's own store list says
                                                about this master: hours, phone (read:master)
+  GET  /api/v1/catalog/{chain}/products        what the chain's stores list online,
+                                               one row per product (read:master)
+  GET  /api/v1/catalog/{chain}/stores          masters whose store lists products,
+                                               or one product (?sku=) (read:master)
   GET  /api/v1/admin/catalog/{chain}           store list, matching and crawl progress
   POST /api/v1/admin/catalog/{chain}/refresh   read the chain's store list now
   GET  /api/v1/admin/catalog/{chain}/missing   stores the chain lists that the lake lacks
@@ -15,7 +19,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +71,30 @@ async def master_chain_stores(
     master_id: uuid.UUID, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
     return {"stores": await catalog.chain_stores_at(session, master_id)}
+
+
+CHAIN_CODE = r"^[a-z0-9-]{1,40}$"
+
+
+@router.get("/catalog/{chain}/products", dependencies=[Depends(require_permission("read:master"))])
+async def chain_products(
+    chain: str = Path(pattern=CHAIN_CODE),
+    q: str | None = Query(default=None, max_length=100),
+    menu: str | None = Query(default=None, max_length=120),
+    page: int = Query(default=1, ge=1, le=1000),
+    per_page: int = Query(default=50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    return await catalog.chain_products(session, chain, q=q, menu=menu, page=page, per_page=per_page)
+
+
+@router.get("/catalog/{chain}/stores", dependencies=[Depends(require_permission("read:master"))])
+async def chain_listed_stores(
+    chain: str = Path(pattern=CHAIN_CODE),
+    sku: str | None = Query(default=None, max_length=64),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    return {"chain": chain, "sku": sku, "master_ids": await catalog.chain_listed_masters(session, chain, sku)}
 
 
 @admin_router.get("/{chain}")

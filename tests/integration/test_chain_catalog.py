@@ -102,6 +102,24 @@ async def test_stores_match_masters_and_list_products() -> None:
 
             r = await c.get(f"/api/v1/master-pois/{uuid.uuid4()}/products", headers={"X-API-Key": key})
             assert r.json()["store"] is None
+
+            # The whole chain: one row per product, and which masters list what.
+            r = await c.get(f"/api/v1/catalog/{chain}/products", headers={"X-API-Key": key})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert (body["stores"], body["total"]) == (1, 2)
+            assert body["menus"] == [{"name": "Bia", "count": 1}, {"name": "Sữa các loại", "count": 1}]
+            milk = next(i for i in body["items"] if i["sku"] == "1")
+            assert (milk["stores"], milk["min_price"], milk["max_price"]) == (1, 7000, 7000)
+            r = await c.get(f"/api/v1/catalog/{chain}/products", params={"q": "bia", "menu": "Bia"},
+                            headers={"X-API-Key": key})
+            assert [i["sku"] for i in r.json()["items"]] == ["3"]
+            r = await c.get(f"/api/v1/catalog/{chain}/stores", headers={"X-API-Key": key})
+            assert r.json()["master_ids"] == [str(near)]
+            r = await c.get(f"/api/v1/catalog/{chain}/stores", params={"sku": "2"}, headers={"X-API-Key": key})
+            assert r.json()["master_ids"] == [], "sku 2 left store A's listing"
+            r = await c.get("/api/v1/catalog/Bad Chain/stores", headers={"X-API-Key": key})
+            assert r.status_code == 422
     finally:
         async with sm() as s:
             await _drop_chain(s, chain)
