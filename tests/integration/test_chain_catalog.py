@@ -152,6 +152,23 @@ async def test_stores_match_masters_and_list_products() -> None:
             assert (day["stores"], day["on_sale"], day["mode_price"], day["regular_price"]) == (1, 1, 6500, 8000)
             r = await c.get(f"/api/v1/catalog/{chain}/products/nope/prices", headers={"X-API-Key": key})
             assert r.status_code == 404
+            r_json = (await c.get(f"/api/v1/catalog/{chain}/products/1/prices",
+                                   headers={"X-API-Key": key})).json()
+            assert r_json["today"]["price"] == 6500 and r_json["today"]["stores"] == 1
+            assert r_json["product"]["owner"]["company"] == "Vinamilk"
+
+            # By brand and by company: VINAMILK is in brand_owners.csv.
+            r = await c.get(f"/api/v1/catalog/{chain}/brands", headers={"X-API-Key": key})
+            assert [(b["slug"], b["skus"]) for b in r.json()["brands"]] == [("vinamilk", 2)]
+            r = await c.get(f"/api/v1/catalog/{chain}/brands/vinamilk", headers={"X-API-Key": key})
+            body = r.json()
+            assert (body["stores"], len(body["products"]), body["brand"]["company_slug"]) == (1, 2, "vinamilk")
+            assert body["on_sale_skus"] == 1
+            r = await c.get(f"/api/v1/catalog/{chain}/companies/vinamilk", headers={"X-API-Key": key})
+            group = r.json()["groups"][0]
+            assert (group["skus"], group["rivals"][0]["company"]) == (2, "Vinamilk")
+            r = await c.get(f"/api/v1/catalog/{chain}/brands/nope", headers={"X-API-Key": key})
+            assert r.status_code == 404
     finally:
         async with sm() as s:
             await _drop_chain(s, chain)

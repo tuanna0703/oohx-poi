@@ -8,7 +8,10 @@
                                                one row per product (read:master)
   GET  /api/v1/catalog/{chain}/stores          masters whose store lists products,
                                                or one product (?sku=) (read:master)
-  GET  /api/v1/catalog/{chain}/products/{sku}/prices   its daily prices (read:master)
+  GET  /api/v1/catalog/{chain}/products/{sku}/prices   its daily prices, today's (read:master)
+  GET  /api/v1/catalog/{chain}/brands[?company=]       brands with products (read:master)
+  GET  /api/v1/catalog/{chain}/brands/{slug}           one brand: products, rivals (read:master)
+  GET  /api/v1/catalog/{chain}/companies/{slug}        one company's brands by group (read:master)
   GET  /api/v1/admin/catalog/{chain}           store list, matching and crawl progress
   POST /api/v1/admin/catalog/{chain}/refresh   read the chain's store list now
   GET  /api/v1/admin/catalog/{chain}/missing   stores the chain lists that the lake lacks
@@ -27,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.catalog.chains import CHAINS, Chain
 from poi_lake.db.models import IngestionJob, IngestionJobStatus, Source
-from poi_lake.services import catalog
+from poi_lake.services import catalog, catalog_brands
 from poi_lake.services.rate_limit import (
     require_permission_with_rate_limit as require_permission,
 )
@@ -75,6 +78,7 @@ async def master_chain_stores(
 
 
 CHAIN_CODE = r"^[a-z0-9-]{1,40}$"
+SLUG = r"^[a-z0-9-]{1,80}$"
 
 
 @router.get("/catalog/{chain}/products", dependencies=[Depends(require_permission("read:master"))])
@@ -96,6 +100,40 @@ async def chain_listed_stores(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     return {"chain": chain, "sku": sku, "master_ids": await catalog.chain_listed_masters(session, chain, sku)}
+
+
+@router.get("/catalog/{chain}/brands", dependencies=[Depends(require_permission("read:master"))])
+async def chain_brands(
+    chain: str = Path(pattern=CHAIN_CODE),
+    company: str | None = Query(default=None, max_length=80),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Brands with products listed (optionally one company's), most products first."""
+    return await catalog_brands.brands(session, chain, company)
+
+
+@router.get("/catalog/{chain}/brands/{slug}", dependencies=[Depends(require_permission("read:master"))])
+async def chain_brand(
+    chain: str = Path(pattern=CHAIN_CODE),
+    slug: str = Path(pattern=SLUG),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    out = await catalog_brands.brand_detail(session, chain, slug)
+    if out is None:
+        raise HTTPException(404, "unknown brand")
+    return out
+
+
+@router.get("/catalog/{chain}/companies/{slug}", dependencies=[Depends(require_permission("read:master"))])
+async def chain_company(
+    chain: str = Path(pattern=CHAIN_CODE),
+    slug: str = Path(pattern=SLUG),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    out = await catalog_brands.company_detail(session, chain, slug)
+    if out is None:
+        raise HTTPException(404, "unknown company")
+    return out
 
 
 @router.get("/catalog/{chain}/products/{sku}/prices", dependencies=[Depends(require_permission("read:master"))])
