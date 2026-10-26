@@ -401,10 +401,12 @@ async def save_items(
             text(
                 """
                 INSERT INTO chain_price_changes (chain, store_code, sku, price, sale_price, seen_at)
-                SELECT :chain, :store, :sku, :price, :sale, :now
+                SELECT CAST(:chain AS varchar), CAST(:store AS varchar), CAST(:sku AS varchar),
+                       CAST(:price AS numeric), CAST(:sale AS numeric), CAST(:now AS timestamptz)
                 WHERE NOT EXISTS (
                     SELECT 1 FROM chain_store_products
-                    WHERE chain = :chain AND store_code = :store AND sku = :sku
+                    WHERE chain = CAST(:chain AS varchar) AND store_code = CAST(:store AS varchar)
+                      AND sku = CAST(:sku AS varchar)
                       AND price IS NOT DISTINCT FROM CAST(:price AS numeric)
                       AND sale_price IS NOT DISTINCT FROM CAST(:sale AS numeric)
                 )
@@ -432,12 +434,15 @@ async def save_items(
                 """
                 WITH gone AS (
                     DELETE FROM chain_store_products
-                    WHERE chain = :chain AND store_code = :store AND seen_at < :now
+                    WHERE chain = CAST(:chain AS varchar) AND store_code = CAST(:store AS varchar)
+                      AND seen_at < CAST(:now AS timestamptz)
                       AND (menu IS NULL OR menu = ANY(:menus))
                     RETURNING sku
                 )
                 INSERT INTO chain_price_changes (chain, store_code, sku, price, sale_price, seen_at)
-                SELECT :chain, :store, sku, NULL, NULL, :now FROM gone
+                SELECT CAST(:chain AS varchar), CAST(:store AS varchar), sku, NULL, NULL,
+                       CAST(:now AS timestamptz)
+                FROM gone
                 """
             ),
             {"chain": chain, "store": store_code, "now": now, "menus": list(answered_menus)},
