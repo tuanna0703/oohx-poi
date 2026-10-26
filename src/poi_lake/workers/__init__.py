@@ -15,6 +15,8 @@ import logging
 import sys
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
@@ -143,6 +145,9 @@ def _start_crawl_planner_scheduler() -> None:
     logger.info("crawl planner scheduler armed: every %d minute(s)", interval_min)
 
 
+REPORT_HOUR_VN = 7  # the daily report is built from this hour on
+
+
 def _start_catalog_scheduler() -> None:
     """Send every chain's refresh once per ``CATALOG_REFRESH_HOURS`` window,
     re-read product listings once per ``CATALOG_ITEMS_HOURS`` window (0 = off),
@@ -171,6 +176,7 @@ def _start_catalog_scheduler() -> None:
             window = int(now // interval_s)
             key = f"poi-lake:scheduler:catalog:{window}"
             from poi_lake.workers.catalog import (
+                build_daily_report,
                 queue_winmart_items,
                 refresh_bachhoaxanh,
                 refresh_winmart,
@@ -190,6 +196,12 @@ def _start_catalog_scheduler() -> None:
             hw = int(now // 3600)
             if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):
                 snapshot_prices.send()
+            # Yesterday's report, once a day from 07:00 Vietnam time.
+            vn = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+            if vn.hour >= REPORT_HOUR_VN and r.set(
+                f"poi-lake:scheduler:daily-report:{vn.date().isoformat()}", "1", ex=2 * 86400, nx=True
+            ):
+                build_daily_report.send()
         except Exception:
             logger.exception("catalog scheduler tick failed")
         finally:
