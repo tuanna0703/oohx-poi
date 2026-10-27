@@ -39,7 +39,7 @@ async def grid_yields(session: AsyncSession, days: int = YIELD_WINDOW_DAYS) -> d
                 FROM ingestion_jobs
                 WHERE status = 'completed'
                   AND params ? 'crawl_plan_id'
-                  AND COALESCE(params->>'sweep', '') <> 'district'
+                  AND COALESCE(params->>'sweep', 'grid') = 'grid'
                   AND completed_at > NOW() - make_interval(days => :d)
                 GROUP BY 1
                 """
