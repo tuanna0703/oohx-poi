@@ -11,7 +11,8 @@ no tạp hóa, gara, karaoke, "quầy thuốc" or "ATM". This applies the curren
     common answer), else their searches (the most common answer).
 
 Read the numbers and samples first; the run keeps the old values in
-``category_backup_20261025`` (master and processed ids with old top/sub):
+``category_backup_<YYYYMMDD>`` (master and processed ids with old top/sub),
+a new table per day so a second run never loses the first one's state:
 
     docker compose exec -T api python scripts/reclassify_categories.py --dry-run
     docker compose exec -T api python scripts/reclassify_categories.py
@@ -36,7 +37,7 @@ from poi_lake.seeds.vn_retail_taxonomy import VN_CODES
 
 Cat = tuple[str | None, str | None]
 BATCH = 2000
-BACKUP = "category_backup_20261025"
+BACKUP = "category_backup_" + time.strftime("%Y%m%d")
 
 
 def _most_common(results: list[Cat]) -> Cat:
@@ -85,6 +86,8 @@ def _plan(rows, masters):  # type: ignore[no-untyped-def]
         by_name = m.map_with_fallback(r.source, r.raw_category, r.name_original)
         by_search = m.from_search(r.searched)
         new = by_name if by_name != (None, None) else by_search
+        if by_name == (None, None) and r.openooh_category:
+            new = (r.openooh_category, r.openooh_subcategory)  # a search never replaces a category
         if new != (r.openooh_category, r.openooh_subcategory):
             proc_new[r.id] = new
         if r.merged_into is not None:
@@ -100,6 +103,11 @@ def _plan(rows, masters):  # type: ignore[no-untyped-def]
             new, source = _most_common([n for n, _ in members]), "row names"
         if new == (None, None):
             new, source = _most_common([s for _, s in members]), "search"
+            # What a crawl searched for is the weakest clue: it may fill a gap,
+            # never replace a category (79 "Thế Giới Di Động" stores found by
+            # grocery searches would have become supermarkets).
+            if mp.openooh_category:
+                new, source = (mp.openooh_category, mp.openooh_subcategory), "kept"
         how[source if new != (None, None) else "none"] += 1
         if new != (mp.openooh_category, mp.openooh_subcategory):
             master_new[mp.id] = new
@@ -123,8 +131,15 @@ def _report(masters, master_new, how) -> None:  # type: ignore[no-untyped-def]
         if old[0]
     )
     print(f"\nre-labelled (had a category before): {sum(changed.values()):,}")
+    names_of: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for mp in masters:
+        if mp.id in master_new and mp.openooh_category:
+            new = master_new[mp.id]
+            names_of[(mp.openooh_subcategory or mp.openooh_category, new[1] or new[0] or "—")].append(mp.canonical_name)
+    pick = random.Random(11)
     for (old, new), k in changed.most_common(25):
-        print(f"  {k:>7,}  {old} → {new}")
+        sample = pick.sample(names_of[(old, new)], min(5, len(names_of[(old, new)])))
+        print(f"  {k:>7,}  {old} → {new}   e.g. " + " | ".join(sample))
 
     subs = Counter(c[1] or c[0] for c in after_cat.values() if c[0])
     print("\nafter, by code:")
