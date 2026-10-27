@@ -139,9 +139,8 @@ async def approve(cid: int, body: Approve, session: AsyncSession = Depends(get_s
     cand = await _one(session, cid)
     if cand["status"] in ("added", "auto_added"):
         raise HTTPException(status.HTTP_409_CONFLICT, "already added")
-    name = " ".join((body.name or cand["name"]).split())
-    if name.lower() != cand["name"].lower() and await brand_discovery._name_taken(session, name):
-        raise HTTPException(status.HTTP_409_CONFLICT, f"{name} is already a brand")
+    # A name the dictionary already has merges the candidate into that brand.
+    name = " ".join((body.name or (cand["ai"] or {}).get("existing_brand") or cand["name"]).split())
     aliases = [" ".join(a.split())[:100] for a in (body.aliases or []) if a.strip()] if body.aliases is not None else None
     batch = "manual-" + str(cid)
     result = await brand_discovery.apply(

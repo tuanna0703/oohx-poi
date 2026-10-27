@@ -77,6 +77,52 @@ async def test_a_chain_is_found_reviewed_added_and_undone() -> None:
             await _cleanup(s, tag)
 
 
+async def test_a_new_spelling_of_a_known_brand_is_merged() -> None:
+    """ "MB ATM" found in the data is MB Bank: approving it adds the spelling."""
+    from poi_lake.services.brand_discovery import run
+
+    tag = "bdm-" + uuid.uuid4().hex[:6]
+    known = "Qbank" + uuid.uuid4().hex[:4]
+    spelling = f"{known} Smartpoint"
+    sm = get_sessionmaker()
+    async with sm() as s:
+        await s.execute(
+            text("INSERT INTO brands (name, aliases, category, country, enabled) VALUES (:n, '{}', 'financial', 'VN', true)"),
+            {"n": known},
+        )
+        for i in range(9):
+            mid = await _seed_master(s, name=f"{spelling} {i}", lat=10.8, lng=106.7 + i / 100,
+                                     test_tag=tag, category="financial")
+            await s.execute(
+                text("UPDATE master_pois SET province_code = :p, openooh_subcategory = 'financial.atms' WHERE id = :i"),
+                {"p": ("79", "01", "48")[i % 3], "i": mid},
+            )
+        await s.commit()
+        token, _ = await _make_client(s, tag, permissions=["write:brands"])
+    key = spelling.lower()
+    try:
+        async with sm() as s:
+            await run(s, use_ai=False)
+        async with await _http() as c:
+            h = {"X-API-Key": token}
+            items = (await c.get("/api/v1/brand-discovery/candidates?status=pending", headers=h)).json()["items"]
+            cand = next(i for i in items if i["key"] == key)
+            r = await c.post(f"/api/v1/brand-discovery/candidates/{cand['id']}/approve",
+                             json={"name": known}, headers=h)
+            assert r.status_code == 200, r.text
+            assert (r.json()["brand"], r.json()["tagged"], r.json()["sweep_rows"]) == (known, 9, 0)
+        async with sm() as s:
+            aliases = (await s.execute(text("SELECT aliases FROM brands WHERE name = :n"), {"n": known})).scalar_one()
+        assert spelling in aliases
+    finally:
+        async with sm() as s:
+            await s.execute(text("UPDATE master_pois SET brand = NULL WHERE brand = :b"), {"b": known})
+            await s.commit()
+        await _forget(known, key)
+        async with sm() as s:
+            await _cleanup(s, tag)
+
+
 async def test_settings_never_return_a_key() -> None:
     tag = "bds-" + uuid.uuid4().hex[:6]
     sm = get_sessionmaker()

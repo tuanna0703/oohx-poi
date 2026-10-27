@@ -362,11 +362,17 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
     summary: Counter[str] = Counter()
     asked = 0
     ai_down = not use_ai
+    # One candidate per chain: "Hoarosa" and "Hoarosa Shop Hoa", "DongA Bank" and
+    # "Donga Bank" are the same once the AI names them. And a chain the
+    # dictionary already has ("MB ATM" is MB Bank) is offered as a merge.
+    known = {_folded(n): n for (n,) in (await session.execute(text("SELECT name FROM brands"))).all()}
+    kept: dict[str, dict[str, Any]] = {}
     for c in found:
         status, ai = decided.get(c["key"], (None, None))
         if status not in (None, "new", "pending"):
             continue  # an admin (or an earlier run) already settled it
         c["ai"] = ai
+        c["original"] = c["name"]
         if not ai and asked >= AI_PER_RUN:
             # Not this run's turn for an AI verdict: keep it out of the review list.
             c["score"], c["status"] = c["rules"], "new"
@@ -391,8 +397,19 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
             c["aliases"] = list(dict.fromkeys([*c["ai"]["aliases"], *c["aliases"]]))[:5]
         c["score"] = total_score(c["rules"], c["ai"])
         c["status"] = decide(c, settings)
-        if c["status"] == "auto_added" and await _name_taken(session, c["name"]):
-            c["status"] = "pending"
+        chain = _folded(c["name"])
+        if c["ai"] and chain in known:
+            c["ai"]["existing_brand"] = known[chain]
+            if c["status"] == "auto_added":
+                c["status"] = "pending"  # merging into a brand is an admin's call
+        elif c["ai"] and chain in kept and c["status"] != "auto_rejected":
+            first = kept[chain]
+            c["status"] = "auto_rejected"
+            c["signals"] = [*c["signals"], {"label": "Trùng", "good": False,
+                                            "text": f"cùng chuỗi với ứng viên {first['name']}"}]
+            await _add_alias(session, first["key"], c["original"])
+        elif c["ai"] and c["status"] != "auto_rejected":
+            kept[chain] = c
         await _store(session, c)
         if c["status"] == "auto_added":
             cid = (await session.execute(
@@ -406,6 +423,23 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
     return {**dict(summary), "batch": batch}
 
 
+def _folded(name: str) -> str:
+    return " ".join(tokens(name)[0])
+
+
+async def _add_alias(session: AsyncSession, key: str, alias: str) -> None:
+    """Another spelling of a kept candidate's chain, seen as a duplicate candidate."""
+    await session.execute(
+        text(
+            """
+            UPDATE brand_candidates SET aliases = aliases || to_jsonb(CAST(:a AS text))
+            WHERE key = :k AND NOT aliases ? :a AND jsonb_array_length(aliases) < 10
+            """
+        ),
+        {"k": key, "a": alias},
+    )
+
+
 async def _name_taken(session: AsyncSession, name: str) -> bool:
     return bool((await session.execute(
         text("SELECT 1 FROM brands WHERE lower(name) = lower(:n)"), {"n": name}
@@ -417,15 +451,31 @@ async def apply(session: AsyncSession, cid: int, *, batch: str, status: str,
                 term: str | None = None, category: str | None = None) -> dict[str, Any]:
     """Add the candidate as a brand: dictionary, re-tag, sweep. Caller commits."""
     row = (await session.execute(
-        text("SELECT name, aliases, search_term, category FROM brand_candidates WHERE id = :i"), {"i": cid}
+        text("SELECT key, name, aliases, search_term, category FROM brand_candidates WHERE id = :i"), {"i": cid}
     )).one()
+    found_as = row.name
     name = (name or row.name).strip()
     aliases = aliases if aliases is not None else list(row.aliases or [])
     term = (term or row.search_term or name).strip()[:40]
     category = category or row.category
-    await upsert_brand(session, name, aliases, category)
-    tagged = await retag(session, name)
-    sweep = await add_brand_sweeps(session, [term], None, SWEEP_PRIORITY)
+    existing = (await session.execute(
+        text("SELECT name, aliases FROM brands WHERE lower(name) = lower(:n)"), {"n": name}
+    )).first()
+    if existing:
+        # A new spelling of a brand the dictionary has ("MB ATM" → MB Bank):
+        # add the spellings, re-tag; its own sweeps already run.
+        name = existing.name
+        merged = list(dict.fromkeys([*(existing.aliases or []), *aliases, found_as]))
+        merged = [a for a in merged if a.lower() != name.lower()][:20]
+        await upsert_brand(session, name, merged, None)
+        tagged = await retag(session, name)
+        sweep = {"rows_added": 0}
+    else:
+        if found_as.lower() != name.lower() and found_as not in aliases:
+            aliases = [*aliases, found_as]
+        await upsert_brand(session, name, aliases, category)
+        tagged = await retag(session, name)
+        sweep = await add_brand_sweeps(session, [term], None, SWEEP_PRIORITY)
     await session.execute(
         text(
             """
@@ -449,6 +499,22 @@ async def remove(session: AsyncSession, cid: int) -> dict[str, Any]:
     )).one()
     if row.status not in ("added", "auto_added"):
         return {"removed": 0}
+    merged_into = (await session.execute(
+        text("SELECT ai->>'existing_brand' FROM brand_candidates WHERE id = :i"), {"i": cid}
+    )).scalar_one()
+    if merged_into:
+        # The brand was there before: it stays, with the spellings and stores
+        # the merge gave it (take a spelling out in the dictionary if it was wrong).
+        await session.execute(
+            text(
+                """
+                UPDATE brand_candidates SET status = 'removed', decided_at = NOW(), updated_at = NOW()
+                WHERE id = :i
+                """
+            ),
+            {"i": cid},
+        )
+        return {"removed": 1, "untagged": 0, "sweeps_cancelled": 0, "kept_brand": merged_into}
     p = {"b": row.name}
     masters = (await session.execute(text("UPDATE master_pois SET brand = NULL WHERE brand = :b"), p)).rowcount
     await session.execute(text("UPDATE processed_pois SET brand = NULL, brand_confidence = NULL WHERE brand = :b"), p)
