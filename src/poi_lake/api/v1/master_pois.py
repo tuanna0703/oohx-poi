@@ -193,34 +193,62 @@ async def list_brands(
 
     sql = text(
         f"""
+        WITH base AS (
+            SELECT brand, id, confidence, openooh_subcategory,
+                   NULLIF(regexp_replace(lower(canonical_website),
+                          '^(https?://)?(www\\.)?([^/:?#]+).*$', '\\3'), '') AS dom
+            FROM master_pois
+            WHERE {where}
+        ),
+        -- The chain's own website: the domain most of its stores link to,
+        -- leaving out social pages, maps, marketplaces and link shorteners.
+        doms AS (
+            SELECT brand, dom, COUNT(*) AS n,
+                   ROW_NUMBER() OVER (PARTITION BY brand ORDER BY COUNT(*) DESC, dom) AS rk
+            FROM base
+            WHERE dom IS NOT NULL AND dom !~ :social
+            GROUP BY brand, dom
+        )
         SELECT
-            brand,
+            b.brand,
             COUNT(*) AS n,
             -- The brand's industry: the subcategory most of its stores carry,
             -- else the level-1 code its dictionary entry has.
             COALESCE(
-                mode() WITHIN GROUP (ORDER BY openooh_subcategory)
-                    FILTER (WHERE openooh_subcategory IS NOT NULL),
-                (SELECT b.category FROM brands b WHERE b.name = master_pois.brand)
+                mode() WITHIN GROUP (ORDER BY b.openooh_subcategory)
+                    FILTER (WHERE b.openooh_subcategory IS NOT NULL),
+                (SELECT x.category FROM brands x WHERE x.name = b.brand)
             ) AS category,
-            (ARRAY_AGG(id::text ORDER BY confidence DESC))[1:3]   AS sample_ids
-        FROM master_pois
-        WHERE {where}
-        GROUP BY brand
-        ORDER BY n DESC, brand ASC
+            (ARRAY_AGG(b.id::text ORDER BY b.confidence DESC))[1:3] AS sample_ids,
+            d.dom AS website,
+            COALESCE(d.n, 0) AS website_stores
+        FROM base b
+        LEFT JOIN doms d ON d.brand = b.brand AND d.rk = 1
+        GROUP BY b.brand, d.dom, d.n
+        ORDER BY n DESC, b.brand ASC
         LIMIT :lim
         """
     )
-    rows = (await session.execute(sql, params)).all()
+    rows = (await session.execute(sql, {**params, "social": _NOT_OWN_SITE})).all()
     return [
         BrandSummary(
             brand=r.brand,
             count=int(r.n),
             category=r.category,
             sample_master_ids=list(r.sample_ids) if r.sample_ids else [],
+            website=r.website,
+            website_stores=int(r.website_stores),
         )
         for r in rows
     ]
+
+
+# Domains a store links to that are not the chain's own site.
+_NOT_OWN_SITE = (
+    r"(^|\.)(facebook|fb|google|goo|g|zalo|instagram|tiktok|youtube|youtu|shopee|lazada|tiki|"
+    r"sendo|linktr|bio|bit|tinyurl|m|business|wa|twitter|x|foody|grab|be|baemin|now|"
+    r"booking|agoda|traveloka|tripadvisor|maps|sites)\.[a-z.]+$"
+)
 
 
 @router.get(
