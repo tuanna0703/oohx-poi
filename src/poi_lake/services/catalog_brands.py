@@ -28,6 +28,7 @@ class Product:
     owner: BrandOwner
     uom: str | None
     image_url: str | None
+    barcode: str | None
     group: str | None  # e.g. "Mỹ phẩm, chăm sóc cá nhân"
     category: str | None  # the narrowest, e.g. "Nước ngọt có ga"
     stores: int
@@ -47,7 +48,7 @@ async def _products(session: AsyncSession, chain: str) -> tuple[list[Product], i
         await session.execute(
             text(
                 """
-                SELECT p.sku, p.name, p.brand, p.uom, p.image_url, p.category_path,
+                SELECT p.sku, p.name, p.brand, p.uom, p.image_url, p.barcode, p.category_path,
                        count(*) AS stores,
                        mode() WITHIN GROUP (ORDER BY COALESCE(sp.sale_price, sp.price)) AS price,
                        mode() WITHIN GROUP (ORDER BY sp.price) AS regular,
@@ -56,7 +57,7 @@ async def _products(session: AsyncSession, chain: str) -> tuple[list[Product], i
                 JOIN chain_stores s ON s.chain = sp.chain AND s.store_code = sp.store_code AND s.active
                 JOIN chain_products p ON p.chain = sp.chain AND p.sku = sp.sku
                 WHERE sp.chain = :c
-                GROUP BY p.sku, p.name, p.brand, p.uom, p.image_url, p.category_path
+                GROUP BY p.sku, p.name, p.brand, p.uom, p.image_url, p.barcode, p.category_path
                 """
             ),
             {"c": chain},
@@ -72,6 +73,7 @@ async def _products(session: AsyncSession, chain: str) -> tuple[list[Product], i
             Product(
                 sku=r.sku, name=r.name, owner=owner, uom=r.uom,
                 image_url=r.image_url if (r.image_url or "").startswith("https://") else None,
+                barcode=r.barcode,
                 group=path[2] if len(path) > 2 else (path[-1] if path else None),
                 category=path[-1] if path else None,
                 stores=int(r.stores),
@@ -102,7 +104,7 @@ def _brand(o: BrandOwner) -> dict[str, Any]:
 
 
 def _product(p: Product) -> dict[str, Any]:
-    return {"sku": p.sku, "name": p.name, "uom": p.uom, "image_url": p.image_url, "group": p.group,
+    return {"sku": p.sku, "name": p.name, "uom": p.uom, "barcode": p.barcode, "image_url": p.image_url, "group": p.group,
             "category": p.category, "stores": p.stores, "price": p.price, "regular": p.regular,
             "on_sale": p.on_sale}
 

@@ -116,6 +116,11 @@ async def test_stores_match_masters_and_list_products() -> None:
             r = await c.get(f"/api/v1/catalog/{chain}/products", params={"q": "bia", "menu": "Bia"},
                             headers={"X-API-Key": key})
             assert [i["sku"] for i in r.json()["items"]] == ["3"]
+            # A barcode (or its start) finds the product too; LIKE wildcards stay literal.
+            r = await c.get(f"/api/v1/catalog/{chain}/products", params={"q": "8933"}, headers={"X-API-Key": key})
+            assert [(i["sku"], i["barcode"]) for i in r.json()["items"]] == [("3", "8933")]
+            r = await c.get(f"/api/v1/catalog/{chain}/products", params={"q": "100%_"}, headers={"X-API-Key": key})
+            assert r.json()["total"] == 0
             r = await c.get(f"/api/v1/catalog/{chain}/stores", headers={"X-API-Key": key})
             assert r.json()["master_ids"] == [str(near)]
             r = await c.get(f"/api/v1/catalog/{chain}/stores", params={"sku": "2"}, headers={"X-API-Key": key})
