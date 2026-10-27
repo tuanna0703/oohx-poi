@@ -132,6 +132,11 @@ def _start_crawl_planner_scheduler() -> None:
                 from poi_lake.workers.crawl_planner import run_crawl_planner
                 run_crawl_planner.send()
                 logger.info("scheduled crawl-planner tick enqueued (window=%d)", window)
+            # Once a day: re-rank the plan by what each code has been yielding.
+            day = int(time.time() // 86400)
+            if r.set(f"poi-lake:scheduler:crawl_rerank:{day}", "1", ex=2 * 86400, nx=True):
+                from poi_lake.workers.crawl_planner import rerank_crawl_plan
+                rerank_crawl_plan.send()
         except Exception:
             logger.exception("crawl planner scheduler tick failed")
         finally:

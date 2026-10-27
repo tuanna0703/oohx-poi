@@ -18,6 +18,12 @@ every category row then passes over it without a job (counted in
 ``cells_skipped`` and ``cells_done``). Before this, 88% of jobs returned
 nothing — the grid spans whole province bboxes, sea and Laos included.
 
+Sparse cells (``CRAWL_SPARSE_PROBE_MAX``): a probe that found only a few
+places saw everything the cell holds, so category jobs pass over it too.
+Category jobs there averaged 0.04-0.26 new places against 7.9 in dense cells.
+Codes whose grid jobs keep coming back thin are pushed to the back of the
+queue by the daily rerank (``services/crawl_priority.py``).
+
 District sweep: codes too rare for cells (``crawl_plan.sweep = 'district'``,
 see ``openooh_keywords.DISTRICT_SWEEP_CODES``) get one job per district of
 the province instead, the district's name added to the query. No probing —
@@ -239,7 +245,12 @@ async def _tick() -> dict[str, Any]:
                 cell_status: dict[int, str] = {}
                 if settings.crawl_probe_cells:
                     cells = await _ensure_cells(session, r.province_code, size, centers)
-                    cell_status = {idx: st for idx, (_cid, st) in cells.items()}
+                    sparse_max = settings.crawl_sparse_probe_max
+                    cell_status = {
+                        idx: "sparse" if st == "populated" and fetched is not None
+                        and fetched <= sparse_max else st
+                        for idx, (_cid, st, fetched) in cells.items()
+                    }
                     # Probe the province before crawling any category in it: a
                     # category job on an empty cell is the waste this avoids.
                     unknown = [i for i, st in cell_status.items() if st == "unknown"]
@@ -264,14 +275,15 @@ async def _tick() -> dict[str, Any]:
                         continue
 
                 # Walk the grid from the cursor: dispatch populated (or
-                # unprobed, when probing is off) cells, pass over empty ones.
+                # unprobed, when probing is off) cells, pass over empty ones
+                # and sparse ones (the probe already took all they hold).
                 # Skips cost no budget, so cap them per tick to keep one
                 # transaction small.
                 job_ids: list[int] = []
                 skipped = 0
                 pos = offset
                 while pos < cells_total and len(job_ids) < allowance and skipped < 5000:
-                    if cell_status.get(pos) == "empty":
+                    if cell_status.get(pos) in ("empty", "sparse"):
                         skipped += 1
                     else:
                         lat, lng = centers[pos]
@@ -320,6 +332,27 @@ async def _tick() -> dict[str, Any]:
     finally:
         engine = get_engine()
         await engine.dispose()
+        get_engine.cache_clear()
+        get_sessionmaker.cache_clear()
+
+
+@dramatiq.actor(queue_name="dedupe", max_retries=1, time_limit=10 * 60_000)
+def rerank_crawl_plan() -> None:
+    """Daily: re-apply plan priorities with the low-yield penalty
+    (``services.crawl_priority``), so codes that stop paying fall back."""
+    stats = asyncio.run(_rerank())
+    logger.info("crawl planner: rerank done %r", stats)
+
+
+async def _rerank() -> dict[str, Any]:
+    from poi_lake.db import get_engine, get_sessionmaker, session_scope
+    from poi_lake.services.crawl_priority import reprioritize
+
+    try:
+        async with session_scope() as session:
+            return await reprioritize(session)
+    finally:
+        await get_engine().dispose()
         get_engine.cache_clear()
         get_sessionmaker.cache_clear()
 
@@ -384,8 +417,9 @@ async def _district_units(session, r) -> list[tuple[str, float, float, int]]:  #
 
 async def _ensure_cells(  # type: ignore[no-untyped-def]
     session, province_code: str, size: int, centers: list[tuple[float, float]]
-) -> dict[int, tuple[int, str]]:
-    """Return ``{idx: (cell_id, status)}`` for a province's grid, creating it once.
+) -> dict[int, tuple[int, str, int | None]]:
+    """Return ``{idx: (cell_id, status, probe_fetched)}`` for a province's grid,
+    creating it once.
 
     New cells start ``unknown``; any cell an earlier category job already
     found something in is marked ``populated`` straight away — there is no
@@ -398,14 +432,14 @@ async def _ensure_cells(  # type: ignore[no-untyped-def]
     found = (
         await session.execute(
             text(
-                "SELECT idx, id, status FROM crawl_cells "
+                "SELECT idx, id, status, fetched FROM crawl_cells "
                 "WHERE province_code = :p AND cell_size_m = :s"
             ),
             params,
         )
     ).all()
     if found:
-        return {int(i): (int(cid), st) for i, cid, st in found}
+        return {int(i): (int(cid), st, f) for i, cid, st, f in found}
 
     await session.execute(
         text(
@@ -446,7 +480,7 @@ async def _ensure_cells(  # type: ignore[no-untyped-def]
     rows = (
         await session.execute(
             text(
-                "SELECT idx, id, status FROM crawl_cells "
+                "SELECT idx, id, status, fetched FROM crawl_cells "
                 "WHERE province_code = :p AND cell_size_m = :s"
             ),
             params,
@@ -456,7 +490,7 @@ async def _ensure_cells(  # type: ignore[no-untyped-def]
         "crawl planner: created %d cells for %s (%d already known populated)",
         len(rows), province_code, sum(1 for r in rows if r.status == "populated"),
     )
-    return {int(i): (int(cid), st) for i, cid, st in rows}
+    return {int(i): (int(cid), st, f) for i, cid, st, f in rows}
 
 
 async def _reset_stale_probes(session) -> int:  # type: ignore[no-untyped-def]
