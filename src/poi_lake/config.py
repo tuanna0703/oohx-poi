@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     # for cells that come back empty. 88% of jobs returned nothing before this:
     # the grid covers whole province bboxes (sea, mountains, Laos).
     crawl_probe_cells: bool = Field(default=True, alias="CRAWL_PROBE_CELLS")
+    # A probe that found this many places or fewer saw the whole cell: its four
+    # broad keywords already ingested what is there, so category jobs pass over
+    # it like an empty one. Measured 2026-10-27 over 21 days: cells probed at
+    # <20 gave 0.04 new places per category job, 21-39 gave 0.26, against 7.9
+    # in dense cells. 0 = off. Brand and district sweeps are not affected.
+    crawl_sparse_probe_max: int = Field(default=39, alias="CRAWL_SPARSE_PROBE_MAX")
+    # Codes whose grid jobs average fewer new places than this (over at least
+    # CRAWL_YIELD_MIN_JOBS jobs in the last 21 days) drop to the back of the
+    # queue when the plan is reprioritized (daily, and on the admin endpoint).
+    crawl_min_yield: float = Field(default=1.0, alias="CRAWL_MIN_YIELD")
+    crawl_yield_min_jobs: int = Field(default=200, alias="CRAWL_YIELD_MIN_JOBS")
 
     # ---- Chain catalogs (store lists + products, queue ``catalog``) ----
     # Hours between full refreshes; 0 = only on demand (admin endpoint).

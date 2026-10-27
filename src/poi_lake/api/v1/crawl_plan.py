@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -25,9 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.config import get_settings
-from poi_lake.pipeline.normalize.openooh_keywords import BRAND_PREFIX, DISTRICT_SWEEP_CODES
+from poi_lake.pipeline.normalize.openooh_keywords import DISTRICT_SWEEP_CODES
 from poi_lake.seeds.openooh_priority import priority_for
 from poi_lake.services import brands as brand_service
+from poi_lake.services import crawl_priority
 
 logger = logging.getLogger(__name__)
 
@@ -465,36 +467,12 @@ async def resume(session: AsyncSession = Depends(get_session)) -> dict[str, int]
 
 
 @router.post("/reprioritize", status_code=status.HTTP_200_OK)
-async def reprioritize(session: AsyncSession = Depends(get_session)) -> dict[str, int]:
-    """Re-apply ``openooh_priority`` (plus the priority-province boost) to every
-    row, leaving status and progress alone — unlike ``/initialize`` with
-    ``overwrite``, which resets them."""
-    settings = get_settings()
-    boosted = [c.strip() for c in settings.crawl_priority_provinces.split(",") if c.strip()]
-    codes = [
-        r[0]
-        for r in (await session.execute(text("SELECT DISTINCT openooh_code FROM crawl_plan"))).all()
-        if not r[0].startswith(BRAND_PREFIX)  # set by /brands, not by the category tiers
-    ]
-    result = await session.execute(
-        text(
-            """
-            UPDATE crawl_plan cp
-            SET priority = v.prio
-                + CASE WHEN cp.province_code = ANY(CAST(:boosted AS TEXT[])) THEN -50 ELSE 0 END
-            FROM unnest(CAST(:codes AS TEXT[]), CAST(:prios AS INT[])) AS v(code, prio)
-            WHERE cp.openooh_code = v.code
-              AND cp.priority IS DISTINCT FROM v.prio
-                + CASE WHEN cp.province_code = ANY(CAST(:boosted AS TEXT[])) THEN -50 ELSE 0 END
-            RETURNING cp.id
-            """
-        ),
-        {"boosted": boosted, "codes": codes, "prios": [priority_for(c) for c in codes]},
-    )
-    n = len(result.all())
-    await session.commit()
-    logger.info("crawl-plan reprioritized: %d rows changed", n)
-    return {"rows_changed": n}
+async def reprioritize(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    """Re-apply ``openooh_priority`` (plus the priority-province boost and the
+    low-yield penalty, see ``services.crawl_priority``) to every row, leaving
+    status and progress alone — unlike ``/initialize`` with ``overwrite``,
+    which resets them. Also runs daily from the worker."""
+    return await crawl_priority.reprioritize(session)
 
 
 @router.post("/brands", status_code=status.HTTP_200_OK)

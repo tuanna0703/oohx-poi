@@ -89,6 +89,7 @@ def _settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(s, "crawl_rate_per_hour", 200, raising=False)
     monkeypatch.setattr(s, "crawl_cell_size_m", CELL_SIZE_M, raising=False)
     monkeypatch.setattr(s, "crawl_probe_cells", True, raising=False)
+    monkeypatch.setattr(s, "crawl_sparse_probe_max", 0, raising=False)
 
 
 async def _cells(prov: str) -> dict[int, str]:
@@ -251,3 +252,89 @@ async def test_three_failed_probes_count_as_populated(plan_row: dict) -> None:
         await svc._update_probe_cell(job, fetched=None)
         st = (await s.execute(text("SELECT status FROM crawl_cells WHERE id=:c"), {"c": cid})).scalar_one()
     assert st == "populated", "never write off a cell because the scraper failed"
+
+
+async def test_sparse_cells_are_skipped_like_empty_ones(
+    plan_row: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that found 3 places saw the whole cell; a category job there
+    would only find them again."""
+    from poi_lake.config import get_settings
+    from poi_lake.workers.crawl_planner import _tick
+
+    monkeypatch.setattr(get_settings(), "crawl_sparse_probe_max", 5, raising=False)
+    prov, centers, plan_id = plan_row["province"], plan_row["centers"], plan_row["plan_id"]
+    n = len(centers)
+
+    await _tick()
+    await _report(prov, {0: 7, 1: 0, 2: 3, 3: 0})
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            text("UPDATE crawl_cells SET status = 'empty' WHERE province_code = :p AND idx >= 4"),
+            {"p": prov},
+        )
+        await s.commit()
+    await _drain(prov)
+
+    stats = await _tick()
+    assert stats["jobs_enqueued"] == 1 and stats["cells_skipped"] == n - 1
+    async with get_sessionmaker()() as s:
+        dispatched = (
+            await s.execute(
+                text(
+                    "SELECT params->>'lat', params->>'lng' FROM ingestion_jobs "
+                    "WHERE params->>'crawl_plan_id' = :i"
+                ),
+                {"i": str(plan_id)},
+            )
+        ).all()
+    assert {(float(a), float(b)) for a, b in dispatched} == {centers[0]}
+    assert (await _cells(prov))[2] == "populated", "the cell itself stays populated"
+
+
+async def test_low_yield_codes_fall_back_in_the_queue(
+    plan_row: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from poi_lake.config import get_settings
+    from poi_lake.seeds.openooh_priority import priority_for
+    from poi_lake.services.crawl_priority import YIELD_PENALTY, reprioritize
+
+    s_ = get_settings()
+    monkeypatch.setattr(s_, "crawl_min_yield", 1.0, raising=False)
+    monkeypatch.setattr(s_, "crawl_yield_min_jobs", 3, raising=False)
+    plan_id = plan_row["plan_id"]
+    sm = get_sessionmaker()
+
+    async def prio() -> int:
+        async with sm() as s:
+            return int(
+                (await s.execute(text("SELECT priority FROM crawl_plan WHERE id = :i"), {"i": plan_id})).scalar_one()
+            )
+
+    async with sm() as s:
+        src = (await s.execute(text("SELECT id FROM sources WHERE code='gosom_scraper'"))).scalar_one()
+        for new in (0, 1, 0):  # 0.33 new places per job
+            await s.execute(
+                text(
+                    "INSERT INTO ingestion_jobs (source_id, job_type, params, status, stats, completed_at) "
+                    "VALUES (:s, 'area_sweep', CAST(:p AS jsonb), 'completed', CAST(:st AS jsonb), NOW())"
+                ),
+                {"s": src, "p": f'{{"category": "retail.grocery", "crawl_plan_id": {plan_id}}}',
+                 "st": f'{{"new": {new}, "fetched": 5}}'},
+            )
+        await s.commit()
+        res = await reprioritize(s)
+    assert "retail.grocery" in res["slow_codes"]
+    assert await prio() == priority_for("retail.grocery") + YIELD_PENALTY
+
+    async with sm() as s:  # the code starts paying again
+        await s.execute(
+            text(
+                "UPDATE ingestion_jobs SET stats = '{\"new\": 9}'::jsonb "
+                "WHERE params->>'crawl_plan_id' = :i"
+            ),
+            {"i": str(plan_id)},
+        )
+        await s.commit()
+        await reprioritize(s)
+    assert await prio() == priority_for("retail.grocery")
