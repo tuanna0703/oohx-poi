@@ -57,6 +57,7 @@ broker = _configure_broker()
 
 # Importing the actor modules registers actors against the broker.
 from poi_lake.workers import (  # noqa: E402 - must follow broker setup
+    brand_discovery,  # noqa: F401
     catalog,  # noqa: F401
     crawl_planner,  # noqa: F401
     dedupe,  # noqa: F401
@@ -137,6 +138,11 @@ def _start_crawl_planner_scheduler() -> None:
             if r.set(f"poi-lake:scheduler:crawl_rerank:{day}", "1", ex=2 * 86400, nx=True):
                 from poi_lake.workers.crawl_planner import rerank_crawl_plan
                 rerank_crawl_plan.send()
+            # Once a week: look for chains nobody has named yet.
+            week = int(time.time() // (7 * 86400))
+            if r.set(f"poi-lake:scheduler:brand_discovery:{week}", "1", ex=8 * 86400, nx=True):
+                from poi_lake.workers.brand_discovery import discover_brands
+                discover_brands.send()
         except Exception:
             logger.exception("crawl planner scheduler tick failed")
         finally:

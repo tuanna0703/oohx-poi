@@ -160,7 +160,9 @@ async def _tick() -> dict[str, Any]:
                     )
                 ).all()
 
-            share = min(max(settings.crawl_brand_share, 0.0), 1.0)
+            from poi_lake.services.app_settings import brand_share
+
+            share = min(max(await brand_share(session), 0.0), 1.0)
             brand_share = round(budget * share)
             # A province-first brand row takes one job, so the lane needs as
             # many rows as it has budget.
@@ -404,11 +406,19 @@ def rerank_crawl_plan() -> None:
 
 async def _rerank() -> dict[str, Any]:
     from poi_lake.db import get_engine, get_sessionmaker, session_scope
+    from poi_lake.services.app_settings import discovery
+    from poi_lake.services.brand_discovery import rescan_brands
     from poi_lake.services.crawl_priority import reprioritize
 
     try:
         async with session_scope() as session:
-            return await reprioritize(session)
+            stats = await reprioritize(session)
+            # Brand sweeps finished long enough ago run again, to catch new stores.
+            stats["brand_rows_rescanned"] = await rescan_brands(
+                session, int((await discovery(session))["rescan_days"])
+            )
+            await session.commit()
+            return stats
     finally:
         await get_engine().dispose()
         get_engine.cache_clear()
