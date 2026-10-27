@@ -18,7 +18,8 @@ def test_public_view_has_no_key() -> None:
         "openai": {"model": "", "role": "fallback"},
     }}
     view = public(settings)
-    assert view["providers"]["claude"] == {
+    claude = {k: v for k, v in view["providers"]["claude"].items() if k != "server_key"}
+    assert claude == {
         "model": "claude-haiku-5-5", "role": "primary", "has_key": True, "key_last4": "WXYZ", "checked": None,
     }
     assert "sk-abcdef" not in str(view)

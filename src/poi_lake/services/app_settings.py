@@ -90,6 +90,7 @@ async def discovery(session: AsyncSession) -> dict[str, Any]:
 def public(settings: dict[str, Any]) -> dict[str, Any]:
     """What bizmap may see: keys reduced to their last four characters."""
     out = {k: v for k, v in settings.items() if k != "providers"}
+    server_key = get_settings().anthropic_api_key is not None
     out["providers"] = {
         p: {
             "model": cfg.get("model", ""),
@@ -97,6 +98,8 @@ def public(settings: dict[str, Any]) -> dict[str, Any]:
             "has_key": bool(cfg.get("key")),
             "key_last4": cfg.get("key_last4"),
             "checked": cfg.get("checked"),
+            # Claude falls back to the server's ANTHROPIC_API_KEY (the dedupe resolver's).
+            "server_key": p == "claude" and server_key,
         }
         for p, cfg in settings["providers"].items()
     }
