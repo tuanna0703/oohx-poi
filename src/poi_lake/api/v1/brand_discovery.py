@@ -243,9 +243,10 @@ async def _update_provider(session: AsyncSession, p: str, change: dict[str, Any]
     cfg = providers.setdefault(p, {})
     cfg.update(change)
     if change.get("role") == "primary":  # one primary: the other steps down to fallback
-        for other, ocfg in providers.items():
-            if other != p and ocfg.get("role") == "primary":
-                ocfg["role"] = "fallback"
+        for other in app_settings.PROVIDERS:
+            role = providers.get(other, {}).get("role", app_settings.DEFAULTS["providers"][other]["role"])
+            if other != p and role == "primary":
+                providers.setdefault(other, {})["role"] = "fallback"
     await app_settings.write(session, app_settings.DISCOVERY, stored)
     await session.commit()
     return app_settings.public(await app_settings.discovery(session))
