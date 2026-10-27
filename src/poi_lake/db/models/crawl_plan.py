@@ -37,7 +37,7 @@ class CrawlPlan(Base):
             "status IN ('pending','in_progress','done','failed','paused')",
             name="ck_crawl_plan_status",
         ),
-        CheckConstraint("sweep IN ('grid', 'district')", name="ck_crawl_plan_sweep"),
+        CheckConstraint("sweep IN ('grid', 'district', 'province')", name="ck_crawl_plan_sweep"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

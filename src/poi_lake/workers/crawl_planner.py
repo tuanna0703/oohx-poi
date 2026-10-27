@@ -72,6 +72,7 @@ def run_crawl_planner() -> None:
 async def _tick() -> dict[str, Any]:
     from poi_lake.config import get_settings
     from poi_lake.db import get_engine, get_sessionmaker, session_scope
+    from poi_lake.pipeline.normalize.openooh_keywords import BRAND_PREFIX
 
     settings = get_settings()
     interval_min = max(1, settings.crawl_planner_minutes)
@@ -131,27 +132,42 @@ async def _tick() -> dict[str, Any]:
             # a tick only ever enqueues `budget` cells, so a row of 563 cells
             # needs ~17 ticks. Excluding them (the pre-2026-07 behaviour) meant
             # each row got exactly one slice and was then abandoned forever.
-            rows = (
-                await session.execute(
-                    text(
-                        """
-                        SELECT cp.id, cp.province_code, cp.openooh_code,
-                               cp.cell_size_m, cp.cells_enqueued, cp.cells_total,
-                               cp.sweep, p.name AS province_name,
-                               p.lng_min, p.lat_min, p.lng_max, p.lat_max
-                        FROM crawl_plan cp
-                        JOIN admin_units p ON p.code = cp.province_code
-                        WHERE cp.status IN ('pending', 'in_progress')
-                          AND (cp.cells_total IS NULL
-                               OR cp.cells_enqueued < cp.cells_total)
-                        ORDER BY cp.priority ASC,
-                                 cp.last_attempt_at ASC NULLS FIRST
-                        LIMIT 5
-                        FOR UPDATE OF cp SKIP LOCKED
-                        """
+            # Two lanes: brand sweeps get CRAWL_BRAND_SHARE of the budget while
+            # category rows have work, the category rows the rest; a lane with
+            # nothing to do leaves its share to the other.
+            async def _next_rows(brand: bool, limit: int):  # type: ignore[no-untyped-def]
+                return (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT cp.id, cp.province_code, cp.openooh_code,
+                                   cp.cell_size_m, cp.cells_enqueued, cp.cells_total,
+                                   cp.sweep, p.name AS province_name,
+                                   p.lng_min, p.lat_min, p.lng_max, p.lat_max
+                            FROM crawl_plan cp
+                            JOIN admin_units p ON p.code = cp.province_code
+                            WHERE cp.status IN ('pending', 'in_progress')
+                              AND (cp.cells_total IS NULL
+                                   OR cp.cells_enqueued < cp.cells_total)
+                              AND (cp.openooh_code LIKE :brand_like) = :brand
+                            ORDER BY cp.priority ASC,
+                                     cp.last_attempt_at ASC NULLS FIRST
+                            LIMIT :lim
+                            FOR UPDATE OF cp SKIP LOCKED
+                            """
+                        ),
+                        {"brand_like": BRAND_PREFIX + "%", "brand": brand, "lim": limit},
                     )
-                )
-            ).all()
+                ).all()
+
+            share = min(max(settings.crawl_brand_share, 0.0), 1.0)
+            brand_share = round(budget * share)
+            # A province-first brand row takes one job, so the lane needs as
+            # many rows as it has budget.
+            brand_rows = await _next_rows(True, max(5, brand_share))
+            other_rows = await _next_rows(False, 5)
+            brand_cap = budget if not other_rows else min(brand_share, budget)
+            rows = list(brand_rows) + list(other_rows)
 
             if not rows:
                 return {"picked": 0, "in_flight": int(in_flight)}
@@ -179,13 +195,52 @@ async def _tick() -> dict[str, Any]:
             probes = 0
             cells_skipped = 0
             to_send: list[int] = []
+            brand_used = 0
             for r in rows:
                 if jobs_enqueued >= budget:
                     break
+                is_brand = r.openooh_code.startswith(BRAND_PREFIX)
+                cap = budget - jobs_enqueued
+                if is_brand:
+                    cap = min(cap, brand_cap - brand_used)
+                    if cap <= 0:
+                        continue
+                if (
+                    is_brand
+                    and r.cells_total is None
+                    and r.sweep in ("district", "province")
+                    and settings.crawl_brand_province_first
+                ):
+                    # The province as one search; ingestion splits it into
+                    # districts if the search comes back full.
+                    place, lat, lng, radius = _area_unit(
+                        str(r.province_name), r.lng_min, r.lat_min, r.lng_max, r.lat_max
+                    )
+                    to_send.append(await _insert_job(session, src_id, {
+                        "lat": lat, "lng": lng, "radius_m": radius,
+                        "category": r.openooh_code, "crawl_plan_id": int(r.id),
+                        "sweep": "province", "place": place,
+                    }))
+                    jobs_enqueued += 1
+                    brand_used += 1
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE crawl_plan SET
+                              status = 'in_progress', sweep = 'province',
+                              cells_total = 1, cells_enqueued = 1,
+                              attempts = attempts + 1, last_attempt_at = NOW()
+                            WHERE id = :id
+                            """
+                        ),
+                        {"id": int(r.id)},
+                    )
+                    picked += 1
+                    continue
                 if r.sweep == "district":
                     units = await _district_units(session, r)
                     offset = int(r.cells_enqueued or 0)
-                    batch = units[offset: offset + budget - jobs_enqueued]
+                    batch = units[offset: offset + cap]
                     for place, lat, lng, radius in batch:
                         to_send.append(await _insert_job(session, src_id, {
                             "lat": lat, "lng": lng, "radius_m": radius,
@@ -193,6 +248,8 @@ async def _tick() -> dict[str, Any]:
                             "sweep": "district", "place": place,
                         }))
                     jobs_enqueued += len(batch)
+                    if is_brand:
+                        brand_used += len(batch)
                     await session.execute(
                         text(
                             """
@@ -239,7 +296,7 @@ async def _tick() -> dict[str, Any]:
                     # Grid shrank (cell_size_m was raised) — nothing left to
                     # dispatch. Leave it to the completion sweep above.
                     continue
-                allowance = max(0, budget - jobs_enqueued)
+                allowance = max(0, cap)
                 radius = size // 2
 
                 cell_status: dict[int, str] = {}
@@ -327,6 +384,7 @@ async def _tick() -> dict[str, Any]:
                 "probes": probes,
                 "cells_skipped": cells_skipped,
                 "budget": budget,
+                "brand_jobs": brand_used,
                 "in_flight_before": int(in_flight),
             }
     finally:
@@ -388,8 +446,6 @@ async def _district_units(session, r) -> list[tuple[str, float, float, int]]:  #
     ``radius_m`` reaches the corners of the district's bounding box, so gosom's
     radius filter keeps everything inside it.
     """
-    import math
-
     from sqlalchemy import text
 
     rows = (
@@ -404,15 +460,20 @@ async def _district_units(session, r) -> list[tuple[str, float, float, int]]:  #
     areas = [(f"{n}, {r.province_name}", x1, y1, x2, y2) for n, x1, y1, x2, y2 in rows] or [
         (str(r.province_name), r.lng_min, r.lat_min, r.lng_max, r.lat_max)
     ]
-    out = []
-    for place, x1, y1, x2, y2 in areas:
-        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
-        lat, lng = (y1 + y2) / 2, (x1 + x2) / 2
-        dy = (y2 - y1) / 2 * 111_320
-        dx = (x2 - x1) / 2 * 111_320 * math.cos(math.radians(lat))
-        radius = int(min(max(math.hypot(dx, dy), 2000), 100_000))
-        out.append((place, round(lat, 6), round(lng, 6), radius))
-    return out
+    return [_area_unit(place, x1, y1, x2, y2) for place, x1, y1, x2, y2 in areas]
+
+
+def _area_unit(place: str, x1: Any, y1: Any, x2: Any, y2: Any) -> tuple[str, float, float, int]:
+    """``(place, lat, lng, radius_m)`` for a bounding box; the radius reaches
+    its corners (2-100 km), so gosom's radius filter keeps everything inside."""
+    import math
+
+    x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+    lat, lng = (y1 + y2) / 2, (x1 + x2) / 2
+    dy = (y2 - y1) / 2 * 111_320
+    dx = (x2 - x1) / 2 * 111_320 * math.cos(math.radians(lat))
+    radius = int(min(max(math.hypot(dx, dy), 2000), 100_000))
+    return place, round(lat, 6), round(lng, 6), radius
 
 
 async def _ensure_cells(  # type: ignore[no-untyped-def]

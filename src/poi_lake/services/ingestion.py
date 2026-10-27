@@ -208,6 +208,7 @@ class IngestionService:
         await self.session.commit()
         await self._update_crawl_plan(job, success=True, raw_count=stats["raw_count"])
         await self._update_probe_cell(job, fetched=stats.get("fetched", 0))
+        await self._split_province(job, fetched=stats.get("fetched", 0))
 
     async def _fail(
         self, job: IngestionJob, reason: str, stats: dict[str, int] | None = None
@@ -260,6 +261,44 @@ class IngestionService:
             await self.session.commit()
         except SQLAlchemyError as exc:
             logger.warning("probe cell update failed for cell %s: %s", cell_id, exc)
+            await self.session.rollback()
+
+    async def _split_province(self, job: IngestionJob, *, fetched: int) -> None:
+        """A brand's province-wide search that came back full has more stores
+        than one page shows: turn its row into a district sweep.
+
+        The row restarts its counters (``pois_raw`` keeps what the province
+        search found); a province without districts stays as it is.
+        """
+        from poi_lake.config import get_settings
+
+        params = job.params or {}
+        plan_id = params.get("crawl_plan_id")
+        if params.get("sweep") != "province" or not plan_id:
+            return
+        if fetched < get_settings().crawl_brand_split_at:
+            return
+        try:
+            await self.session.execute(
+                text(
+                    """
+                    UPDATE crawl_plan cp SET
+                      sweep = 'district', cells_total = d.n, cells_enqueued = 0,
+                      cells_done = 0, cells_failed = 0,
+                      status = 'in_progress', completed_at = NULL
+                    FROM (
+                        SELECT count(*) AS n FROM admin_units u
+                        JOIN crawl_plan c ON u.parent_code = c.province_code
+                        WHERE c.id = :pid AND u.level = 2 AND u.lng_min IS NOT NULL
+                    ) d
+                    WHERE cp.id = :pid AND cp.sweep = 'province' AND d.n > 0
+                    """
+                ),
+                {"pid": int(plan_id)},
+            )
+            await self.session.commit()
+        except SQLAlchemyError as exc:
+            logger.warning("province split failed for plan %s: %s", plan_id, exc)
             await self.session.rollback()
 
     async def _update_crawl_plan(

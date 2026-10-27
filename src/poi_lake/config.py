@@ -84,6 +84,15 @@ class Settings(BaseSettings):
     # queue when the plan is reprioritized (daily, and on the admin endpoint).
     crawl_min_yield: float = Field(default=1.0, alias="CRAWL_MIN_YIELD")
     crawl_yield_min_jobs: int = Field(default=200, alias="CRAWL_YIELD_MIN_JOBS")
+    # Brand sweeps get this share of each tick's budget while category rows
+    # have work left (and all of it when they have none, and vice versa), so
+    # neither lane waits days behind the other.
+    crawl_brand_share: float = Field(default=0.30, alias="CRAWL_BRAND_SHARE")
+    # A brand row searches its province as a whole first; only a province
+    # whose search returns this many places or more (a page is ~20) is split
+    # into districts. Off = every district straight away, as before.
+    crawl_brand_province_first: bool = Field(default=True, alias="CRAWL_BRAND_PROVINCE_FIRST")
+    crawl_brand_split_at: int = Field(default=15, alias="CRAWL_BRAND_SPLIT_AT")
 
     # ---- Chain catalogs (store lists + products, queue ``catalog``) ----
     # Hours between full refreshes; 0 = only on demand (admin endpoint).
