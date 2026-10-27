@@ -21,7 +21,11 @@ async def test_brand_category_is_the_most_common_one() -> None:
         for i, sub in enumerate(["retail.apparel", "retail.mother_baby", "retail.mother_baby", None]):
             mid = await _seed_master(s, name=f"{brand} {i}", lat=10.8, lng=106.7 + i / 100,
                                      test_tag=tag, brand=brand, category="retail")
-            await s.execute(text("UPDATE master_pois SET openooh_subcategory = :c WHERE id = :i"), {"c": sub, "i": mid})
+            site = ["https://www.indus.vn/a", "http://indus.vn", "https://facebook.com/indus", None][i]
+            await s.execute(
+                text("UPDATE master_pois SET openooh_subcategory = :c, canonical_website = :w WHERE id = :i"),
+                {"c": sub, "w": site, "i": mid},
+            )
         await s.commit()
         token, _ = await _make_client(s, tag)
     try:
@@ -29,6 +33,7 @@ async def test_brand_category_is_the_most_common_one() -> None:
             rows = (await c.get("/api/v1/master-pois/brands?limit=500", headers={"X-API-Key": token})).json()
         row = next(r for r in rows if r["brand"] == brand)
         assert (row["count"], row["category"]) == (4, "retail.mother_baby")
+        assert (row["website"], row["website_stores"]) == ("indus.vn", 2), "social pages are not its site"
     finally:
         async with sm() as s:
             await _cleanup(s, tag)

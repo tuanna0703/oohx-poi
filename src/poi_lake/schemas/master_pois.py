@@ -95,3 +95,6 @@ class BrandSummary(BaseModel):
     count: int
     category: str | None = None
     sample_master_ids: list[str] = Field(default_factory=list)
+    # The domain most of its stores link to (not a social page), and how many do.
+    website: str | None = None
+    website_stores: int = 0
