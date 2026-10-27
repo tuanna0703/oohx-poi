@@ -45,6 +45,25 @@ from poi_lake.seeds.vn_retail_taxonomy import FIRST, VN_CATEGORIES, VN_CODES
         ("Hớt Tóc Hoàng Tiến", "health_and_beauty.barbers"),
         ("Siêu thị mini Bảo Ngọc", "retail.grocery"),
         ("G23 Mart", "retail.convenience_stores"),
+        # added 2026-10-27
+        ("Điểm Cung Cấp Dịch Vụ VNPT - Vinaphone", "retail.telecom"),
+        ("Cửa Hàng Viettel Telecom số 451 Hà Huy Giáp", "retail.telecom"),
+        ("MobiFone Thạnh Yên A", "retail.telecom"),
+        ("Viettel Post Bưu Cục Tân Bình", "retail.courier"),
+        ("NINJAVAN Định Hoá", "retail.courier"),
+        ("Bưu điện Văn hóa xã Tân Lập", "retail.courier"),
+        ("Trạm sạc VinFast Vincom Plaza", "transit.ev_charging"),
+        ("Trạm đổi PIN XMĐ Vinfast", "transit.ev_charging"),
+        ("Mua Bán Xe Máy,Xe Điện Vinfast", "retail.motorbike_dealers"),
+        ("VINFAST TÂN Á CHÂU", "retail.dealerships"),
+        ("VUS Tô Ký 2", "education.training_centers"),
+        ("California Fitness & Yoga Đà Nẵng", "sports_and_fitness.gyms"),
+        ("Quán Cơm Bình Dân Thu Hà", "hospitality.restaurants"),
+        ("Hủ Tiếu Nam Vang Hồng Phát", "hospitality.restaurants"),
+        ("Quán Bia Tươi 68", "hospitality.beer_halls"),
+        ("Sacombank PGD Tân Phú", "financial.banks"),
+        ("Nhà Nghỉ Hoàng Long", "travel.hotels"),
+        ("Chung cư Hoàng Anh Gia Lai", "residential.apartment_buildings"),
     ],
 )
 def test_names(name: str, expected: str) -> None:
@@ -104,10 +123,15 @@ def test_codes_are_wired_everywhere() -> None:
     assert all(100 <= priority_for(c) < 300 for c in VN_CODES - set(FIRST))
 
 
-def test_migration_matches_the_seed() -> None:
-    path = next(Path(__file__).parents[2].glob("migrations/versions/*_0007_vn_retail_categories.py"))
-    spec = importlib.util.spec_from_file_location("m0007", path)
+def _migration_rows(pattern: str) -> list[tuple[str, str]]:
+    path = next(Path(__file__).parents[2].glob(f"migrations/versions/{pattern}"))
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert [(c.code, c.name) for c in VN_CATEGORIES] == mod._ROWS
+    return list(mod._ROWS)
+
+
+def test_migrations_match_the_seed() -> None:
+    rows = _migration_rows("*_0007_vn_retail_categories.py") + _migration_rows("*_0015_more_vn_categories.py")
+    assert sorted((c.code, c.name) for c in VN_CATEGORIES) == sorted(rows)
