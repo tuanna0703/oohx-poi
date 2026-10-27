@@ -64,6 +64,11 @@ from poi_lake.seeds.vn_retail_taxonomy import FIRST, VN_CATEGORIES, VN_CODES
         ("Sacombank PGD Tân Phú", "financial.banks"),
         ("Nhà Nghỉ Hoàng Long", "travel.hotels"),
         ("Chung cư Hoàng Anh Gia Lai", "residential.apartment_buildings"),
+        ("Thế Giới Di Động", "retail.electronics"),
+        ("Tiệm Trà Sữa Cát Tường", "hospitality.milk_tea"),
+        ("Trà sữa ăn vặt cô Hồng", "hospitality.milk_tea"),
+        ("Ăn Vặt Cô Tấm", "hospitality.fast_food"),
+        ("Máy tính - Camera Vinh Nguyễn", "retail.electronics"),
     ],
 )
 def test_names(name: str, expected: str) -> None:
