@@ -464,6 +464,8 @@ async def save_items(
 
 
 _LIKE_ESCAPE = re.compile(r"([\\%_])")
+# A query that may be a SKU or barcode: one word of letters and digits, with a digit.
+CODE_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9.-]{3,40}$")
 
 
 async def master_products(
@@ -607,9 +609,20 @@ async def chain_products(
     if menu:
         clauses.append("sp.menu = :menu")
         params["menu"] = menu
+    by_name = []
     for j, token in enumerate(normalize_text(q or "").split()[:6]):
-        clauses.append(f"p.name_folded LIKE :t{j} ESCAPE '\'")
-        params[f"t{j}"] = "%" + _LIKE_ESCAPE.sub(r"\\1", token) + "%"
+        by_name.append(f"p.name_folded LIKE :t{j} ESCAPE '\\'")
+        params[f"t{j}"] = "%" + _LIKE_ESCAPE.sub(r"\\\1", token) + "%"
+    code = (q or "").strip()
+    if CODE_RE.match(code):
+        # Maybe a SKU or a barcode (or the start of one), as well as words of the name.
+        params["code"] = _LIKE_ESCAPE.sub(r"\\\1", code) + "%"
+        clauses.append(
+            f"(({' AND '.join(by_name) or 'false'}) "
+            "OR p.sku ILIKE :code ESCAPE '\\' OR p.barcode LIKE :code ESCAPE '\\')"
+        )
+    else:
+        clauses.extend(by_name)
     where = " AND ".join(clauses)
     join = f"FROM chain_store_products sp {_LISTED} JOIN chain_products p ON p.chain = sp.chain AND p.sku = sp.sku"
     total = int(
@@ -619,12 +632,12 @@ async def chain_products(
         await session.execute(
             text(
                 f"""
-                SELECT p.sku, p.name, p.brand, p.uom, p.image_url, min(sp.menu) AS menu,
+                SELECT p.sku, p.name, p.brand, p.uom, p.image_url, p.barcode, min(sp.menu) AS menu,
                        count(DISTINCT sp.store_code) AS stores,
                        min(COALESCE(sp.sale_price, sp.price)) AS min_price,
                        max(COALESCE(sp.sale_price, sp.price)) AS max_price
                 {join} WHERE {where}
-                GROUP BY p.sku, p.name, p.brand, p.uom, p.image_url
+                GROUP BY p.sku, p.name, p.brand, p.uom, p.image_url, p.barcode
                 ORDER BY count(DISTINCT sp.store_code) DESC, p.name, p.sku
                 LIMIT :limit OFFSET :offset
                 """
@@ -637,7 +650,7 @@ async def chain_products(
         "page": page, "per_page": per_page,
         "items": [
             {
-                "sku": r.sku, "name": r.name, "brand": r.brand, "uom": r.uom,
+                "sku": r.sku, "name": r.name, "brand": r.brand, "uom": r.uom, "barcode": r.barcode,
                 "image_url": r.image_url, "menu": r.menu, "stores": int(r.stores),
                 "min_price": int(r.min_price) if r.min_price is not None else None,
                 "max_price": int(r.max_price) if r.max_price is not None else None,
