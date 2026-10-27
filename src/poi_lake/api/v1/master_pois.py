@@ -196,8 +196,13 @@ async def list_brands(
         SELECT
             brand,
             COUNT(*) AS n,
-            (ARRAY_AGG(openooh_subcategory ORDER BY openooh_subcategory)
-                FILTER (WHERE openooh_subcategory IS NOT NULL))[1] AS category,
+            -- The brand's industry: the subcategory most of its stores carry,
+            -- else the level-1 code its dictionary entry has.
+            COALESCE(
+                mode() WITHIN GROUP (ORDER BY openooh_subcategory)
+                    FILTER (WHERE openooh_subcategory IS NOT NULL),
+                (SELECT b.category FROM brands b WHERE b.name = master_pois.brand)
+            ) AS category,
             (ARRAY_AGG(id::text ORDER BY confidence DESC))[1:3]   AS sample_ids
         FROM master_pois
         WHERE {where}
