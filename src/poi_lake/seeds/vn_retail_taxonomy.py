@@ -82,7 +82,8 @@ VN_CATEGORIES: tuple[VnCategory, ...] = (
     VnCategory(
         "retail.motorbike_dealers", "Motorbike Dealers",
         ("đại lý xe máy", "head honda", "yamaha town", "cửa hàng xe điện"),
-        ("dai ly xe may", "cua hang xe may", "head honda", "honda head", "yamaha town", "xe dien"),
+        ("dai ly xe may", "cua hang xe may", "head honda", "honda head", "yamaha town", "xe dien",
+         "xe may dien"),
     ),
     VnCategory(
         "retail.auto_repair", "Car Repair & Garages",
@@ -108,6 +109,21 @@ VN_CATEGORIES: tuple[VnCategory, ...] = (
         "retail.florists", "Florists",
         ("shop hoa", "cửa hàng hoa tươi"),
         ("shop hoa", "hoa tuoi", "tiem hoa"),
+    ),
+    # Added 2026-10-27: 28% of active masters had no subcategory, VinaPhone,
+    # Viettel Store and Ninja Van among them.
+    VnCategory(
+        "retail.courier", "Courier & Post Offices",
+        ("bưu cục", "chuyển phát nhanh", "bưu điện"),
+        ("buu cuc", "buu dien", "chuyen phat nhanh", "chuyen phat", "giao hang nhanh", "giao hang tiet kiem",
+         "ghn", "ghtk", "viettel post", "vnpost", "ninja van", "ninjavan", "best express", "spx express",
+         "shopee express", "ems"),
+    ),
+    VnCategory(
+        "retail.telecom", "Telecom Stores (viễn thông)",
+        ("cửa hàng viettel", "cửa hàng vinaphone", "cửa hàng mobifone"),
+        ("viettel store", "cua hang viettel", "diem giao dich viettel", "vinaphone", "mobifone", "vietnamobile",
+         "vnpt", "vien thong", "sim so"),
     ),
     # ---- hospitality ----
     VnCategory(
@@ -152,13 +168,20 @@ VN_CATEGORIES: tuple[VnCategory, ...] = (
     VnCategory(
         "education.training_centers", "Language & Training Centers",
         ("trung tâm ngoại ngữ", "trung tâm tiếng anh"),
-        ("ngoai ngu", "tieng anh", "anh ngu", "luyen thi", "trung tam dao tao"),
+        ("ngoai ngu", "tieng anh", "anh ngu", "luyen thi", "trung tam dao tao", "vus", "anh van hoi viet my",
+         "apollo english", "yola", "wall street english", "language link"),
     ),
     # ---- sports ----
     VnCategory(
         "sports_and_fitness.sports_courts", "Sports Courts & Pitches",
         ("sân bóng đá mini", "sân cầu lông", "sân pickleball", "sân tennis"),
         ("san bong", "san cau long", "pickleball", "san tennis", "san quan vot", "bong da mini"),
+    ),
+    # ---- transit ----
+    VnCategory(
+        "transit.ev_charging", "EV Charging & Battery Swap",
+        ("trạm sạc xe điện", "trạm đổi pin"),
+        ("tram sac", "sac xe dien", "tram doi pin", "doi pin"),
     ),
 )
 
