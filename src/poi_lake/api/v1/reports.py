@@ -1,6 +1,7 @@
 """Daily reports.
 
   GET  /api/v1/reports/daily?days=30            the latest reports, newest first (read:master)
+  GET  /api/v1/reports/growth?days=7            what the lake gained in the last days (read:master)
   POST /api/v1/admin/reports/daily?day=YYYY-MM-DD   build one now (admin)
 """
 
@@ -28,6 +29,14 @@ async def daily_reports(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     return {"reports": await reports.recent_reports(session, days)}
+
+
+@router.get("/reports/growth", dependencies=[Depends(require_permission("read:master"))])
+async def growth(
+    days: int = Query(default=7, ge=1, le=366),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    return await reports.growth_report(session, days)
 
 
 @admin_router.post("/daily")
