@@ -43,6 +43,13 @@ async def test_build_and_read_daily_report() -> None:
             r = await c.get("/api/v1/reports/daily", params={"days": 366}, headers={"X-API-Key": key})
             assert r.status_code == 200, r.text
             assert any(x["day"] == DAY.isoformat() for x in r.json()["reports"])
+
+            r = await c.get("/api/v1/reports/growth", params={"days": 7}, headers={"X-API-Key": key})
+            assert r.status_code == 200, r.text
+            g = r.json()
+            assert set(g) >= {"totals", "daily", "brands", "categories", "provinces", "wards", "new_brands"}
+            assert len(g["daily"]) <= 7
+            assert all(len(b["series"]) == reports.SERIES_DAYS for b in g["brands"])
     finally:
         async with sm() as s:
             await s.execute(text("DELETE FROM daily_reports WHERE day = :d"), {"d": DAY})
