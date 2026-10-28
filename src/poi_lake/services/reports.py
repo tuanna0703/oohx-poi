@@ -207,7 +207,7 @@ async def recent_reports(session: AsyncSession, days: int) -> list[dict[str, Any
 # ---- growth over a period, for bizmap's "Tăng trưởng dữ liệu" page ----
 
 SERIES_DAYS = 14  # each brand's small per-day line
-TOP_WARDS = 300
+TOP_WARDS = 1000  # bizmap keeps only names in the official ward list
 
 
 def _gain(end: dict[str, int] | None, start: dict[str, int] | None, key: str) -> int | None:
