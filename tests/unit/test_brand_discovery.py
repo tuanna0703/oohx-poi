@@ -7,6 +7,7 @@ from poi_lake.services.app_settings import DEFAULTS
 from poi_lake.services.brand_discovery import (
     decide,
     fold,
+    generic_reason,
     keys_of,
     prune_keys,
     rule_score,
@@ -78,3 +79,38 @@ def test_provider_order_and_cost() -> None:
     assert brand_ai.order(settings) == ["claude"]
     assert brand_ai.cost("claude", "claude-haiku-5-5", 1_000_000, 0) == 0.10
     assert brand_ai.cost("openai", "some-model", 1000, 1000) is None
+
+
+PLACES = frozenset({"ha noi", "da nang", "dong nai"})
+
+
+def _why(name: str, purity: float | None = 0.95) -> str | None:
+    return generic_reason(tuple(tokens(name)[0]), PLACES, purity)
+
+
+def test_generic_names_wait_for_review() -> None:
+    for name in [
+        "Gia Truyền", "Phin", "Bao Cấp", "Dubai", "Việt Pháp", "Dược Hà Nội", "Tây Minh Châu",
+        "sữa DHA MAX", "HEAD", "Thế giới đèn", "Đạt Chuẩn GPP", "Cơ Điện Lạnh", "Dê Núi",
+        "Burger Việt", "Phòng Khám Đa Khoa Sài Gòn", "Điểm Bưu Điện Văn Hóa Xã",
+        "Hoàng Barber", "An Coffee Tea", "K Market", "K Coffee", "Di Động T",
+    ]:
+        assert _why(name), name
+
+
+def test_chain_names_pass() -> None:
+    for name in [
+        "Napoli Coffee", "KienlongBank", "TOKYOLIFE", "Mì cay Yagami", "Bama Mart", "Toyota",
+        "Shinhan Bank", "Vinamilk", "Gu Coffee", "Circa", "ICOOL", "Mì Cay SEOUL",
+    ]:
+        assert _why(name) is None, name
+
+
+def test_a_chain_named_like_a_person_waits_too() -> None:
+    # "Nắng" is also a given name: rules cannot tell it from "An Coffee Tea", a person does.
+    assert _why("Nắng Coffee & Tea")
+
+
+def test_stores_of_unrelated_kinds_wait_for_review() -> None:
+    assert _why("Commonwealth Bank", 0.57)
+    assert _why("Commonwealth Bank", 0.9) is None

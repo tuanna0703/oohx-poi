@@ -18,7 +18,10 @@ Weekly (and on demand from bizmap's admin):
    a candidate it has not seen yet stays ``new`` (not shown for review).
 3. **Decide.** Below ``reject_below``: rejected. At ``add_at`` or more, with
    enough stores and provinces and a positive AI verdict, and auto-add on:
-   added, in a batch that can be undone. Everything else waits for review.
+   added, in a batch that can be undone. Everything else waits for review,
+   and so does a name that looks generic however high it scores (a dish or
+   kind of shop, a place, an owner's name before a shop type, stores of
+   unrelated kinds): the AI calls "Gia Truyền", "Phin" or "Dubai" chains.
 
 Adding a brand is what ``PUT /api/v1/brands/{name}`` does: dictionary row,
 re-tag of the stores already crawled, a brand sweep (province first). Removing
@@ -106,6 +109,60 @@ _GENERIC_WORDS = """
     hanoi saigon hcm da nang hue hai phong can tho
 """
 GENERIC = frozenset(_GENERIC_WORDS.split())
+
+# Words that say what kind of shop or dish it is, not whose it is (folded).
+# Matched as whole words anywhere in the name; "tay" and "sua" only first
+# ("[nhà thuốc] tây Minh Châu", "sữa DHA Max").
+DESCRIPTORS: tuple[tuple[str, ...], ...] = tuple(
+    tuple(p.split())
+    for p in (
+        "gia truyen", "bao cap", "phin", "dat chuan", "gpp", "dien lanh", "co dien", "de nui",
+        "burger", "head", "the gioi", "di dong", "da khoa", "van hoa", "dac san", "truyen thong",
+    )
+)
+FIRST_DESCRIPTORS = frozenset({"tay", "sua", "duoc"})
+# Countries and big cities in a name: "Việt Pháp", "Dubai", "Dược Hà Nội".
+FOREIGN_PLACES: tuple[tuple[str, ...], ...] = tuple(
+    tuple(p.split())
+    for p in ("dubai", "phap", "nhat ban", "han quoc", "thai lan", "trung quoc", "sai gon", "ha noi", "viet nam")
+)
+# Shop types after an owner's name: "Hoàng Barber", "An Coffee Tea", "K Market".
+SHOP_TYPES = frozenset(
+    ["barber", "coffee", "cafe", "tea", "store", "mart", "market", "shop", "salon", "hair", "spa", "house", "quan"]
+)
+MIXED_BELOW = 0.65  # share of a candidate's stores in its main kind of business
+
+
+def _has(words: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    n = len(phrase)
+    return any(words[i: i + n] == phrase for i in range(len(words) - n + 1))
+
+
+def generic_reason(words: tuple[str, ...], places: frozenset[str], group_purity: float | None) -> str | None:
+    """Why a candidate's name looks generic rather than a chain's, or None."""
+    if not words:
+        return None
+    for d in DESCRIPTORS:
+        if _has(words, d):
+            return f'chứa từ chỉ loại hàng, món ăn hoặc loại cửa hàng ("{" ".join(d)}")'
+    if words[0] in FIRST_DESCRIPTORS:
+        return f'bắt đầu bằng từ chỉ loại hàng ("{words[0]}")'
+    for f in FOREIGN_PLACES:
+        if _has(words, f):
+            return f'chứa tên nước hoặc thành phố ("{" ".join(f)}")'
+    for n in (3, 2, 1):
+        for i in range(len(words) - n + 1):
+            w = " ".join(words[i: i + n])
+            if w in places and len(w) > 3:
+                return f'chứa tên địa phương ("{w}")'
+    if len(words) >= 2 and (words[0] in GENERIC or len(words[0]) == 1) and all(
+        w in SHOP_TYPES or w in GENERIC for w in words[1:]
+    ):
+        return "giống tên chủ quán đi với loại cửa hàng"
+    if group_purity is not None and group_purity < MIXED_BELOW:
+        return f"chỉ {round(100 * group_purity)}% điểm khớp cùng một ngành, còn lại là ngành khác"
+    return None
+
 
 PLACE_PREFIXES = ("tinh", "thanh pho", "tp", "quan", "huyen", "thi xa", "thi tran", "phuong", "xa")
 
@@ -289,6 +346,10 @@ async def find(session: AsyncSession, settings: dict[str, Any]) -> list[dict[str
             continue
         top_cat, top_n = s["cats"].most_common(1)[0]
         purity = top_n / stores
+        groups: Counter[str] = Counter()
+        for cat, n in s["cats"].items():
+            groups[(cat or "").split(".")[0]] += n
+        group_purity = groups.most_common(1)[0][1] / stores
         needle = " " + " ".join(k) + " "
         anywhere = [i for i in first_word[k[0]] if needle in " " + " ".join(parsed[i][1]) + " "]
         lead = set(s["rows"])
@@ -316,6 +377,7 @@ async def find(session: AsyncSession, settings: dict[str, Any]) -> list[dict[str
             "search_term": name[:40], "rules": rules,
             "signals": signals_of(stores, provinces, purity, top_cat, position, common, settings),
             "samples": samples,
+            "generic": generic_reason(k, places, group_purity),
         })
     out.sort(key=lambda c: -c["rules"])
     return out
@@ -397,6 +459,12 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
             c["aliases"] = list(dict.fromkeys([*c["ai"]["aliases"], *c["aliases"]]))[:5]
         c["score"] = total_score(c["rules"], c["ai"])
         c["status"] = decide(c, settings)
+        why = c.get("generic") or generic_reason(tuple(tokens(c["name"])[0]), frozenset(), None)
+        if why:
+            c["signals"] = [*c["signals"], {"label": "Tên chung chung", "good": False,
+                                            "text": f"{why}: cần người duyệt"}]
+            if c["status"] == "auto_added":
+                c["status"] = "pending"
         chain = _folded(c["name"])
         if c["ai"] and chain in known:
             c["ai"]["existing_brand"] = known[chain]
