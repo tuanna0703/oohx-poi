@@ -2,8 +2,9 @@
 
   PUT /api/v1/brands/{name}           add or update a chain: dictionary, re-tag, sweep
   GET /api/v1/brands/{name}/progress  sweep rows done, places found, stores tagged
+  GET /api/v1/brands/quality          is each brand a chain, its industry, its twins
 
-Both need the ``write:brands`` permission on the API client.
+The first two need ``write:brands``; the quality list needs ``read:master``.
 """
 
 from __future__ import annotations
@@ -13,9 +14,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_permission
+from poi_lake.services import brand_quality
 from poi_lake.services.brands import add_brand_sweeps, brand_progress, retag, upsert_brand
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,32 @@ def _clean(values: list[str], limit: int) -> list[str]:
     return out
 
 
+@router.get("/quality", dependencies=[Depends(require_permission("read:master"))])
+async def list_quality(
+    verdict: str | None = Query(default=None, pattern="^(keep|hide)$"),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Every assessed brand, most stores first (``services/brand_quality.py``).
+
+    Recorded only: a "hide" brand is still tagged on its stores until an
+    admin acts on it. ``industry`` keys are bizmap's industries.
+    """
+    where = "WHERE verdict = :v" if verdict else ""
+    rows = (await session.execute(
+        text(
+            f"""
+            SELECT brand, display_name, verdict, industry, confidence, name_share, vote,
+                   lake_code, reason, merge_into, stores, matching_stores, computed_at
+            FROM brand_quality {where}
+            ORDER BY stores DESC, brand
+            """
+        ),
+        {"v": verdict} if verdict else {},
+    )).mappings().all()
+    items = [{**r, "computed_at": r["computed_at"].isoformat()} for r in rows]
+    return {"items": items, "total": len(items)}
+
+
 @router.put("/{name}", status_code=status.HTTP_200_OK)
 async def put_brand(
     name: str,
@@ -63,6 +92,7 @@ async def put_brand(
     terms = _clean(payload.search_terms, 40) or [name[:40]]
     await upsert_brand(session, name, aliases, payload.category)
     tagged = await retag(session, name)
+    await brand_quality.run(session, [name])
     sweep: dict[str, int] = {}
     if payload.sweep:
         try:

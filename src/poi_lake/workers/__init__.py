@@ -138,6 +138,10 @@ def _start_crawl_planner_scheduler() -> None:
             if r.set(f"poi-lake:scheduler:crawl_rerank:{day}", "1", ex=2 * 86400, nx=True):
                 from poi_lake.workers.crawl_planner import rerank_crawl_plan
                 rerank_crawl_plan.send()
+            # Once a day: is each tagged brand a chain, which industry, its twins.
+            if r.set(f"poi-lake:scheduler:brand_quality:{day}", "1", ex=2 * 86400, nx=True):
+                from poi_lake.workers.brand_discovery import assess_brand_quality
+                assess_brand_quality.send()
             # Once a week: look for chains nobody has named yet.
             week = int(time.time() // (7 * 86400))
             if r.set(f"poi-lake:scheduler:brand_discovery:{week}", "1", ex=8 * 86400, nx=True):

@@ -221,10 +221,12 @@ async def list_brands(
             ) AS category,
             (ARRAY_AGG(b.id::text ORDER BY b.confidence DESC))[1:3] AS sample_ids,
             d.dom AS website,
-            COALESCE(d.n, 0) AS website_stores
+            COALESCE(d.n, 0) AS website_stores,
+            q.industry, q.confidence, q.verdict, q.name_share, q.merge_into
         FROM base b
         LEFT JOIN doms d ON d.brand = b.brand AND d.rk = 1
-        GROUP BY b.brand, d.dom, d.n
+        LEFT JOIN brand_quality q ON q.brand = b.brand
+        GROUP BY b.brand, d.dom, d.n, q.industry, q.confidence, q.verdict, q.name_share, q.merge_into
         ORDER BY n DESC, b.brand ASC
         LIMIT :lim
         """
@@ -238,6 +240,11 @@ async def list_brands(
             sample_master_ids=list(r.sample_ids) if r.sample_ids else [],
             website=r.website,
             website_stores=int(r.website_stores),
+            industry=r.industry,
+            confidence=r.confidence,
+            verdict=r.verdict,
+            name_share=r.name_share,
+            merge_into=r.merge_into,
         )
         for r in rows
     ]
