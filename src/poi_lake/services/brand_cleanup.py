@@ -79,7 +79,12 @@ def _carrier(name: str, aliases: list[str], pattern: str | None) -> Callable[[st
 
 
 async def build_plan(session: AsyncSession) -> list[BrandPlan]:
-    """What a clean-up would change, brand by brand (brands with no change left out)."""
+    """What a clean-up would change, brand by brand (brands with no change left out).
+
+    Re-assesses every brand first, so verdicts follow today's rules and
+    dictionary; ``plan`` does not commit, so its re-assessment is discarded.
+    """
+    await brand_quality.run(session)
     dictionary = {
         r.name: r
         for r in (await session.execute(

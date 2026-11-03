@@ -109,6 +109,19 @@ def _compact(w: str) -> str:
     return w.replace(" ", "")
 
 
+_NON_WORD_ACCENTED = re.compile(r"[\W_]+", re.UNICODE)
+
+
+def _accented_words(s: str) -> str:
+    """Lower case words with their accents kept: "Đồ Gỗ" → "đồ gỗ"."""
+    return _NON_WORD_ACCENTED.sub(" ", unicodedata.normalize("NFC", s).lower()).strip()
+
+
+# Names this short ("GO!", "MB", "KFC") collide with ordinary words once the
+# accents are gone: GO! (Big C) tagged every "Đồ gỗ" and "Mì gõ".
+SHORT_NAME = 3
+
+
 # Words a chain's name carries that its shops often leave out:
 # "The Coffee House", "Trung Nguyên Legend".
 NAME_FILLER = frozenset({"the", "viet", "nam", "vietnam", "store", "shop", "legend", "official", "jsc", "company"})
@@ -127,7 +140,11 @@ def name_matches(store_name: str, brand_name: str) -> bool:
     As a run of words (full name or core), glued ("Win Mart" ~ "WinMart"),
     or, for a core of two or more words of 3+ letters, those words in any
     order ("HEAD Honda" ~ "Honda HEAD"; "La Cà Phê" is not "Phê La").
+    A name of three letters or fewer must match with its accents: "GO!" is
+    not "Đồ Gỗ".
     """
+    if len(_compact(words(brand_name))) <= SHORT_NAME:
+        return f" {_accented_words(brand_name)} " in f" {_accented_words(store_name)} "
     s = words(store_name)
     padded = f" {s} "
     tokens = set(s.split(" "))
