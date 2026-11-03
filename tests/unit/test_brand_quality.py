@@ -136,3 +136,28 @@ def test_lake_codes_map_to_industries_exact_code_first_then_level_one() -> None:
     assert industry_for_code("retail.unknown_shop") is None
     assert industry_for_code(None) is None
     assert set(INDUSTRIES) >= {"misc", "telecom", "vehicles"}
+
+
+def test_an_alias_of_only_some_of_the_brands_words_is_not_trusted() -> None:
+    from poi_lake.services.brand_quality import partial_aliases, trusted_aliases
+
+    assert partial_aliases("Phở Gia Truyền", ["gia truyền", "Gia Truyền", "Pho Gia Truyen"]) == ["gia truyền", "Gia Truyền"]
+    assert partial_aliases("Galaxy Cinema", ["Galaxy"]) == ["Galaxy"]
+    assert trusted_aliases("MB ATM", ["MB Bank ATM", "Ngân hàng Quân Đội ATM"]) == ["MB Bank ATM", "Ngân hàng Quân Đội ATM"]
+    assert trusted_aliases("Viettel Store", ["Cửa hàng Viettel"]) == ["Cửa hàng Viettel"]
+
+
+def test_a_trusted_alias_counts_as_carrying_the_name() -> None:
+    names = ["Ngân hàng Quân Đội ATM 1", "Ngân hàng Quân Đội ATM 2", "MB ATM 3"]
+    assert decide("MB ATM", names, "bank").verdict == "hide", "by its name alone"
+    d = decide("MB ATM", names, "bank", ["Ngân hàng Quân Đội ATM"])
+    assert (d.verdict, d.industry, d.name_share) == ("keep", "bank", 1.0)
+
+
+def test_a_name_of_three_letters_or_fewer_must_match_with_its_accents() -> None:
+    assert not name_matches("Xưởng mộc Tiến Đồ Gỗ", "GO!")
+    assert not name_matches("Mì Gõ 76", "GO!")
+    assert name_matches("GO! Thăng Long", "GO!")
+    assert name_matches("KFC Lê Lợi", "KFC")
+    assert name_matches("ATM MB Nam Trường Tiền", "MB")
+    assert not name_matches("ATM MBBANK", "MB")

@@ -7,7 +7,8 @@ category is the code most of its stores got from the per-store keyword
 classifier, which files Vinamilk under electronics. This module checks each
 brand against its own stores' names, with no person in the loop:
 
-1. Name check: the share of its stores whose name carries the brand's name.
+1. Name check: the share of its stores whose name carries the brand's name
+   (or a trusted alias: not one made of only some of the brand's own words).
    Under ``MIN_NAME_SHARE`` it is a detector mistake, not a chain ("hide").
 2. Industry: Vietnamese trade keywords in the store names (and the brand's
    own name) vote; the vote and the lake's code give the industry and how
@@ -108,6 +109,19 @@ def _compact(w: str) -> str:
     return w.replace(" ", "")
 
 
+_NON_WORD_ACCENTED = re.compile(r"[\W_]+", re.UNICODE)
+
+
+def _accented_words(s: str) -> str:
+    """Lower case words with their accents kept: "Đồ Gỗ" → "đồ gỗ"."""
+    return _NON_WORD_ACCENTED.sub(" ", unicodedata.normalize("NFC", s).lower()).strip()
+
+
+# Names this short ("GO!", "MB", "KFC") collide with ordinary words once the
+# accents are gone: GO! (Big C) tagged every "Đồ gỗ" and "Mì gõ".
+SHORT_NAME = 3
+
+
 # Words a chain's name carries that its shops often leave out:
 # "The Coffee House", "Trung Nguyên Legend".
 NAME_FILLER = frozenset({"the", "viet", "nam", "vietnam", "store", "shop", "legend", "official", "jsc", "company"})
@@ -126,7 +140,11 @@ def name_matches(store_name: str, brand_name: str) -> bool:
     As a run of words (full name or core), glued ("Win Mart" ~ "WinMart"),
     or, for a core of two or more words of 3+ letters, those words in any
     order ("HEAD Honda" ~ "Honda HEAD"; "La Cà Phê" is not "Phê La").
+    A name of three letters or fewer must match with its accents: "GO!" is
+    not "Đồ Gỗ".
     """
+    if len(_compact(words(brand_name))) <= SHORT_NAME:
+        return f" {_accented_words(brand_name)} " in f" {_accented_words(store_name)} "
     s = words(store_name)
     padded = f" {s} "
     tokens = set(s.split(" "))
@@ -145,11 +163,34 @@ def name_matches(store_name: str, brand_name: str) -> bool:
     return False
 
 
-def name_share(store_names: Sequence[str], brand_name: str) -> float:
-    """Share of names that carry the brand's name, 0–1."""
+def carries(store_name: str, brand_name: str, aliases: Sequence[str] = ()) -> bool:
+    """Does a store's name carry the brand's name or one of its trusted aliases?"""
+    return any(name_matches(store_name, b) for b in (brand_name, *aliases))
+
+
+def name_share(store_names: Sequence[str], brand_name: str, aliases: Sequence[str] = ()) -> float:
+    """Share of names that carry the brand's name (or a trusted alias), 0–1."""
     if not store_names:
         return 0.0
-    return sum(1 for n in store_names if name_matches(n, brand_name)) / len(store_names)
+    return sum(1 for n in store_names if carries(n, brand_name, aliases)) / len(store_names)
+
+
+def partial_aliases(brand_name: str, aliases: Sequence[str]) -> list[str]:
+    """Aliases made of only some of the brand's own words: "Galaxy" for
+    "Galaxy Cinema", "gia truyền" for "Phở Gia Truyền". They tag every
+    "Karaoke Galaxy" and "Nhà thuốc gia truyền", so they are not trusted."""
+    own = set(words(brand_name).split())
+    out = []
+    for a in aliases:
+        w = set(words(a).split()) - {""}
+        if w and w < own:
+            out.append(a)
+    return out
+
+
+def trusted_aliases(brand_name: str, aliases: Sequence[str]) -> list[str]:
+    bad = set(partial_aliases(brand_name, aliases))
+    return [a for a in aliases if a not in bad]
 
 
 # ---------------------------------------------------------------------------
@@ -292,15 +333,18 @@ def _pct(x: float) -> str:
     return f"{round(x * 100)}%"
 
 
-def decide(brand_name: str, store_names: Sequence[str], lake_industry: str | None) -> Decision:
-    """What to do with one brand. ``lake_industry`` is what the lake's code says.
+def decide(
+    brand_name: str, store_names: Sequence[str], lake_industry: str | None, aliases: Sequence[str] = ()
+) -> Decision:
+    """What to do with one brand. ``lake_industry`` is what the lake's code says;
+    ``aliases`` are its trusted spellings ("Ngân hàng Quân Đội ATM" for MB ATM).
 
     "keep" + "high" may enter rankings; "medium" shows in its industry; "low"
     shows as misc. No store names is no evidence: nothing is hidden or re-filed.
     """
     if not store_names:
         return Decision("keep", lake_industry or "misc", "low", 0.0, Vote(None, 0.0), "Chưa có danh sách cửa hàng")
-    share = name_share(store_names, brand_name)
+    share = name_share(store_names, brand_name, aliases)
     vote = industry_vote(store_names)
     own = industry_of_name(brand_name)
     glued = industry_of_brand_name(brand_name)
@@ -358,7 +402,8 @@ SELECT m.brand,
            mode() WITHIN GROUP (ORDER BY m.openooh_subcategory)
                FILTER (WHERE m.openooh_subcategory IS NOT NULL),
            (SELECT x.category FROM brands x WHERE x.name = m.brand)
-       ) AS code
+       ) AS code,
+       (SELECT x.aliases FROM brands x WHERE x.name = m.brand) AS aliases
 FROM master_pois m
 WHERE m.status = 'active' AND m.brand IS NOT NULL {only}
 GROUP BY m.brand
@@ -391,8 +436,9 @@ async def run(session: AsyncSession, names: Sequence[str] | None = None) -> dict
     stats = {"brands": 0, "hide": 0, "high": 0, "medium": 0, "low": 0}
     for r in rows:
         store_names = [n for n in (r.names or []) if n and n.strip()]
-        d = decide(r.brand, store_names, industry_for_code(r.code))
-        matching = sum(1 for n in store_names if name_matches(n, r.brand))
+        trusted = trusted_aliases(r.brand, list(r.aliases or []))
+        d = decide(r.brand, store_names, industry_for_code(r.code), trusted)
+        matching = sum(1 for n in store_names if carries(n, r.brand, trusted))
         await session.execute(
             text(_UPSERT_SQL),
             {

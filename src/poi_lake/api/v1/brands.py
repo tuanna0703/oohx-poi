@@ -3,8 +3,12 @@
   PUT /api/v1/brands/{name}           add or update a chain: dictionary, re-tag, sweep
   GET /api/v1/brands/{name}/progress  sweep rows done, places found, stores tagged
   GET /api/v1/brands/quality          is each brand a chain, its industry, its twins
+  GET /api/v1/brands/quality/plan     dry run: what a clean-up would untag
+  POST /api/v1/brands/quality/apply   untag stores not carrying their brand (logged)
+  POST /api/v1/brands/quality/undo/{run_id}
+  GET|PUT /api/v1/brands/quality/settings   {"apply": bool}: clean up daily
 
-The first two need ``write:brands``; the quality list needs ``read:master``.
+The quality list needs ``read:master``; everything else ``write:brands``.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_permission
-from poi_lake.services import brand_quality
+from poi_lake.services import app_settings, brand_cleanup, brand_quality
 from poi_lake.services.brands import add_brand_sweeps, brand_progress, retag, upsert_brand
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,49 @@ async def list_quality(
     )).mappings().all()
     items = [{**r, "computed_at": r["computed_at"].isoformat()} for r in rows]
     return {"items": items, "total": len(items)}
+
+
+@router.get("/quality/plan")
+async def quality_plan(session: AsyncSession = Depends(get_session), _client: Any = _perm) -> dict[str, Any]:
+    """What ``apply`` would change, brand by brand. Writes nothing."""
+    return await brand_cleanup.plan(session)
+
+
+@router.post("/quality/apply")
+async def quality_apply(session: AsyncSession = Depends(get_session), _client: Any = _perm) -> dict[str, Any]:
+    result = await brand_cleanup.apply(session)
+    await session.commit()
+    return result
+
+
+@router.post("/quality/undo/{run_id}")
+async def quality_undo(
+    run_id: str, session: AsyncSession = Depends(get_session), _client: Any = _perm
+) -> dict[str, int]:
+    result = await brand_cleanup.undo(session, run_id)
+    await session.commit()
+    return result
+
+
+class CleanupSettings(BaseModel):
+    apply: bool
+
+
+@router.get("/quality/settings")
+async def get_cleanup_settings(
+    session: AsyncSession = Depends(get_session), _client: Any = _perm
+) -> dict[str, Any]:
+    return await brand_cleanup.settings(session)
+
+
+@router.put("/quality/settings")
+async def put_cleanup_settings(
+    payload: CleanupSettings, session: AsyncSession = Depends(get_session), _client: Any = _perm
+) -> dict[str, Any]:
+    value = {**(await brand_cleanup.settings(session)), "apply": payload.apply}
+    await app_settings.write(session, brand_cleanup.SETTINGS_KEY, value)
+    await session.commit()
+    return value
 
 
 @router.put("/{name}", status_code=status.HTTP_200_OK)

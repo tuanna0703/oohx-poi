@@ -24,18 +24,19 @@ def discover_brands() -> None:
 
 @dramatiq.actor(queue_name="dedupe", max_retries=0, time_limit=20 * 60_000)
 def assess_brand_quality() -> None:
-    """Daily: record whether each tagged brand is a chain, its industry, its twins."""
+    """Daily: record whether each tagged brand is a chain, its industry, its
+    twins; untag stores that do not carry their brand if an admin turned it on."""
     stats = asyncio.run(_quality())
     logger.info("brand quality done %r", stats)
 
 
 async def _quality() -> dict[str, Any]:
     from poi_lake.db import get_engine, get_sessionmaker, session_scope
-    from poi_lake.services.brand_quality import run
+    from poi_lake.services.brand_cleanup import daily
 
     try:
         async with session_scope() as session:
-            return await run(session)
+            return await daily(session)
     finally:
         await get_engine().dispose()
         get_engine.cache_clear()
