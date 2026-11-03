@@ -44,7 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.pipeline.normalize.openooh_keywords import BRAND_PREFIX
-from poi_lake.services import app_settings, brand_ai
+from poi_lake.services import app_settings, brand_ai, brand_quality
 from poi_lake.services.brands import add_brand_sweeps, retag, upsert_brand
 
 logger = logging.getLogger(__name__)
@@ -544,6 +544,7 @@ async def apply(session: AsyncSession, cid: int, *, batch: str, status: str,
         await upsert_brand(session, name, aliases, category)
         tagged = await retag(session, name)
         sweep = await add_brand_sweeps(session, [term], None, SWEEP_PRIORITY)
+    await brand_quality.run(session, [name])
     await session.execute(
         text(
             """

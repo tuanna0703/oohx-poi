@@ -98,3 +98,12 @@ class BrandSummary(BaseModel):
     # The domain most of its stores link to (not a social page), and how many do.
     website: str | None = None
     website_stores: int = 0
+    # From the daily brand quality check (services/brand_quality.py); null
+    # until a brand was assessed. ``industry`` is bizmap's industry key;
+    # "hide" = few stores carry the name; ``merge_into`` = the brand it is a
+    # format of ("MB Smartbank" → "MB ATM"). ``category`` above is unchanged.
+    industry: str | None = None
+    confidence: str | None = None
+    verdict: str | None = None
+    name_share: float | None = None
+    merge_into: str | None = None
