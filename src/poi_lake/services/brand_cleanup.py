@@ -11,10 +11,10 @@
   its regex loses the tag, on the processed rows and on the master (a master
   keeps it while one of its rows still carries the name: the merge would
   stamp it back otherwise).
-* A brand judged "hide" whose own name is a generic phrase (``generic_reason``
-  of brand discovery: "Phở Gia Truyền") is not a chain at all: every tag goes
-  and its dictionary row is disabled so the detector stops using it. A "hide"
-  brand with a real name (Galaxy Cinema) only loses the stores above.
+* A brand none of whose stores carries its name is disabled in the dictionary
+  so the detector stops using it. A "hide" brand that some stores do carry
+  (Galaxy Cinema, Phong Vũ, Phê La) keeps those: a generic-looking name is
+  not reason enough, it also caught real chains.
 
 Every change is logged in ``brand_cleanup_log`` with what was there before,
 so ``undo`` puts a run back. ``plan`` is the same pass without writing.
@@ -35,7 +35,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.services import app_settings, brand_quality
-from poi_lake.services.brand_discovery import generic_reason, tokens
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +49,8 @@ class BrandPlan:
     brand: str
     action: str  # "disable" | "trim"
     reason: str
+    kept: int = 0
+    samples: list[str] = field(default_factory=list)
     drop_aliases: list[str] = field(default_factory=list)
     processed: list[int] = field(default_factory=list)
     masters: list[str] = field(default_factory=list)
@@ -59,6 +60,7 @@ class BrandPlan:
             "brand": self.brand, "action": self.action, "reason": self.reason,
             "drop_aliases": self.drop_aliases,
             "untag_processed": len(self.processed), "untag_masters": len(self.masters),
+            "kept_masters": self.kept, "untag_samples": self.samples,
         }
 
 
@@ -111,23 +113,24 @@ async def build_plan(session: AsyncSession) -> list[BrandPlan]:
         if not rows and not ms:
             continue
         aliases = list(entry.aliases or [])
-        why = generic_reason(tuple(tokens(name)[0]), frozenset(), None)
-        if verdicts.get(name) == "hide" and why:
-            plans.append(BrandPlan(
-                name, "disable", f"Ít cửa hàng mang tên và tên {why}",
-                drop_aliases=[], processed=[r[0] for r in rows], masters=[m[0] for m in ms],
-            ))
-            continue
         drop = brand_quality.partial_aliases(name, aliases) if verdicts.get(name) == "hide" else []
         carries = _carrier(name, [a for a in aliases if a not in drop], entry.match_pattern)
         untag_rows = [r[0] for r in rows if not carries(r[1])]
         kept_members = {r[2] for r in rows if r[2] and carries(r[1])}
         untag_ms = [m[0] for m in ms if m[0] not in kept_members and not carries(m[1])]
-        if drop or untag_rows or untag_ms:
+        gone = set(untag_ms)
+        samples = [m[1] or "" for m in ms if m[0] in gone][:5]
+        if len(untag_rows) == len(rows) and len(untag_ms) == len(ms):
+            plans.append(BrandPlan(
+                name, "disable", "Không cửa hàng nào mang tên chuỗi", kept=0, samples=samples,
+                processed=untag_rows, masters=untag_ms,
+            ))
+        elif drop or untag_rows or untag_ms:
             plans.append(BrandPlan(
                 name, "trim",
                 "Bỏ tên gọi khác chung chung và cửa hàng không mang tên chuỗi" if drop
                 else "Bỏ cửa hàng không mang tên chuỗi",
+                kept=len(ms) - len(untag_ms), samples=samples,
                 drop_aliases=drop, processed=untag_rows, masters=untag_ms,
             ))
     plans.sort(key=lambda p: -(len(p.masters) + len(p.processed)))
