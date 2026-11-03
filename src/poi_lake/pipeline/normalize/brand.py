@@ -3,7 +3,11 @@
 Strategy:
   1. Pre-cache the ``brands`` table (rarely changes).
   2. Try regex match (highest priority — defined explicitly per brand).
-  3. Fall back to substring match against the alias list (case + accent-fold).
+  3. Fall back to the alias list: the name must carry an alias as a run of
+     words, glued ("Win Mart" ~ "WinMart"), or in any order only when the
+     alias has two or more words of 3+ letters (``brand_quality.name_matches``,
+     the rule the daily brand quality check uses). Any order for short words
+     tagged "La Cà Phê" as Phê La and every "Nhà thuốc gia truyền".
 
 Returns the canonical brand name + a confidence in [0, 1].
 """
@@ -20,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.db.models import Brand
 from poi_lake.pipeline.normalize.text import normalize_text
+from poi_lake.services.brand_quality import name_matches, words
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,7 @@ class _CompiledBrand:
     name: str
     aliases_folded: tuple[str, ...]
     pattern: re.Pattern[str] | None
+    aliases: tuple[str, ...] = ()
 
 
 class BrandDetector:
@@ -74,8 +80,9 @@ class BrandDetector:
             aliases = tuple(
                 {normalize_text(a) for a in [row.name, *row.aliases] if a}
             )
+            raw = tuple(dict.fromkeys(a for a in [row.name, *row.aliases] if a))
             compiled.append(
-                _CompiledBrand(name=row.name, aliases_folded=aliases, pattern=pattern)
+                _CompiledBrand(name=row.name, aliases_folded=aliases, pattern=pattern, aliases=raw)
             )
         self._brands = compiled
         self._loaded_at = time.monotonic()
@@ -92,24 +99,19 @@ class BrandDetector:
             if b.pattern and b.pattern.search(name):
                 return BrandMatch(name=b.name, confidence=0.95)
 
-        # Then alias word-boundary match on the accent-folded form.
-        # ``in folded`` was too loose — short aliases like "go" or "phe la"
-        # matched inside unrelated words ("a good day" → "Big C", etc.).
-        folded = normalize_text(name)
+        # Then the aliases (the name itself included), whole words on the
+        # accent-folded form. ``in folded`` was too loose — short aliases like
+        # "go" matched inside unrelated words ("a good day" → "Big C", etc.).
+        folded = words(name)
         if not folded:
             return None
-        # Tokens of the candidate name; we accept a brand alias only when
-        # all its tokens appear as whole words in the candidate.
-        tokens = set(folded.split())
         for b in self._brands:
-            for alias in b.aliases_folded:
-                if not alias:
+            for alias in b.aliases:
+                alias_words = words(alias).split()
+                # Reject 1-character alias words entirely — too noisy.
+                if not alias_words or any(len(t) < 2 for t in alias_words):
                     continue
-                alias_tokens = alias.split()
-                # Reject 1-character aliases entirely — too noisy.
-                if any(len(t) < 2 for t in alias_tokens):
-                    continue
-                if all(t in tokens for t in alias_tokens):
-                    conf = 0.9 if folded == alias else 0.75
+                if name_matches(name, alias):
+                    conf = 0.9 if folded == " ".join(alias_words) else 0.75
                     return BrandMatch(name=b.name, confidence=conf)
         return None
