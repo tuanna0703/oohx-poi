@@ -50,6 +50,8 @@ async def test_a_chain_is_found_reviewed_added_and_undone() -> None:
             cand = next(i for i in items if i["key"] == key)
             assert (cand["stores"], cand["provinces"]) == (10, 3)
             assert cand["score"] < 80, "no AI verdict: never enough to add on its own"
+            codes = {b["code"] for b in cand["blocked_by"]}
+            assert "ai_missing" in codes
             assert all(sm_["ok"] for sm_ in cand["samples"])
 
             r = await c.post(f"/api/v1/brand-discovery/candidates/{cand['id']}/approve",

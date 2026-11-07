@@ -5,6 +5,7 @@ from __future__ import annotations
 from poi_lake.services import brand_ai
 from poi_lake.services.app_settings import DEFAULTS
 from poi_lake.services.brand_discovery import (
+    blocked_by,
     decide,
     fold,
     generic_reason,
@@ -63,6 +64,26 @@ def test_auto_add_needs_the_switch_the_score_the_spread_and_the_ai() -> None:
     assert decide({**good, "ai": None}, settings) == "pending"
     assert decide({**good, "stores": 5}, settings) == "pending"
     assert decide({**good, "score": 30}, settings) == "auto_rejected"
+
+
+def test_blocked_by_names_every_test_the_candidate_fails() -> None:
+    settings = {**DEFAULTS, "auto_add": True, "add_at": 70, "min_stores": 15, "min_provinces": 3}
+    good = {"status": "pending", "score": 90, "stores": 446, "provinces": 40,
+            "ai": {"is_chain": True}, "signals": []}
+    assert blocked_by(good, settings) == []
+    assert blocked_by({**good, "status": "added"}, settings) is None
+    assert blocked_by({**good, "provinces": 2, "score": 68}, {**settings, "auto_add": False}) == [
+        {"code": "auto_add_off"},
+        {"code": "score", "have": 68, "need": 70},
+        {"code": "provinces", "have": 2, "need": 3},
+    ]
+    assert blocked_by({**good, "ai": None}, settings) == [{"code": "ai_missing"}]
+    assert blocked_by({**good, "ai": {"is_chain": False}}, settings) == [{"code": "ai_not_chain"}]
+    merge = {**good, "ai": {"is_chain": True, "existing_brand": "MB Bank"}}
+    assert blocked_by(merge, settings) == [{"code": "existing_brand", "brand": "MB Bank"}]
+    generic = {**good, "signals": [{"label": "Tên chung chung", "good": False,
+                                    "text": "tên một món ăn: cần người duyệt"}]}
+    assert blocked_by(generic, settings) == [{"code": "generic", "reason": "tên một món ăn"}]
 
 
 def test_ai_reply_parsing_tolerates_fences() -> None:
