@@ -10,7 +10,7 @@
   POST /brand-discovery/batches/{batch}/undo       undo every brand of a batch
   POST /brand-discovery/run                        a discovery pass, now
   GET  /brand-discovery/settings                   keys reduced to their last 4
-  PUT  /brand-discovery/settings                   thresholds, budget, lane
+  PUT  /brand-discovery/settings                   thresholds, budget, lane, ai_per_run
   PUT  /brand-discovery/providers/{p}              key, model, role
   DELETE /brand-discovery/providers/{p}/key
   POST /brand-discovery/providers/{p}/check        a tiny call with the key
@@ -216,6 +216,7 @@ class SettingsIn(BaseModel):
     min_provinces: int | None = Field(default=None, ge=1, le=63)
     brand_share: float | None = Field(default=None, ge=0, le=1)
     rescan_days: int | None = Field(default=None, ge=0, le=3650)
+    ai_per_run: int | None = Field(default=None, ge=0, le=5000)
 
 
 @router.put("/settings")

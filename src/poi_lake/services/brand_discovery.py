@@ -53,7 +53,8 @@ SWEEP_PRIORITY = -90
 SEEN_MIN_STORES = 8       # below this a key is not even worth showing
 SEEN_MIN_PROVINCES = 2
 KEEP_FROM_SCORE = 35      # weaker candidates are not even stored
-AI_PER_RUN = 300          # verdicts asked per run, best rule scores first (~$0.06 on Haiku 5.5)
+# Verdicts asked per run, best rule scores first: settings["ai_per_run"]
+# (300 by default, ~$0.06 on Haiku 5.5), asked brand_ai.AI_CONCURRENCY at once.
 LONGER_KEEPS = 0.6        # a longer key replaces a shorter one keeping this share of its stores
 
 # Shop-type words a store name starts with before its brand (folded).
@@ -457,36 +458,36 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
     }
     batch = "auto-" + datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%Y%m%d-%H%M")
     summary: Counter[str] = Counter()
-    asked = 0
-    ai_down = not use_ai
+    # This run's turn for an AI verdict: the open candidates without one, best
+    # rule scores first (``found`` is sorted so), asked all at once up front.
+    open_ = [c for c in found if decided.get(c["key"], (None, None))[0] in (None, "new", "pending")]
+    to_ask = [c for c in open_ if not decided.get(c["key"], (None, None))[1]][: int(settings["ai_per_run"])]
+    turn = {c["key"] for c in to_ask}
+    verdicts: dict[str, brand_ai.Verdict] = {}
+    if use_ai and to_ask:
+        verdicts, why_down = await brand_ai.verify_many(session, to_ask, settings)
+        if why_down:
+            # Budget spent or no provider: the rest of this run goes without.
+            summary["ai_unavailable"] += 1
+            logger.info("brand discovery: AI unavailable after %d verdicts: %s", len(verdicts), why_down)
+    summary["ai_asked"] = len(verdicts)
     # One candidate per chain: "Hoarosa" and "Hoarosa Shop Hoa", "DongA Bank" and
     # "Donga Bank" are the same once the AI names them. And a chain the
     # dictionary already has ("MB ATM" is MB Bank) is offered as a merge.
     known = {_folded(n): n for (n,) in (await session.execute(text("SELECT name FROM brands"))).all()}
     kept: dict[str, dict[str, Any]] = {}
-    for c in found:
-        status, ai = decided.get(c["key"], (None, None))
-        if status not in (None, "new", "pending"):
-            continue  # an admin (or an earlier run) already settled it
+    for c in open_:
+        ai = decided.get(c["key"], (None, None))[1]
+        if not ai and c["key"] in verdicts:
+            ai = verdicts[c["key"]].as_json()
         c["ai"] = ai
         c["original"] = c["name"]
-        if not ai and asked >= AI_PER_RUN:
+        if not ai and c["key"] not in turn:
             # Not this run's turn for an AI verdict: keep it out of the review list.
             c["score"], c["status"] = c["rules"], "new"
             await _store(session, c)
             summary["new"] += 1
             continue
-        if not ai and not ai_down:
-            asked += 1
-            try:
-                c["ai"] = (await brand_ai.verify(session, c, settings)).as_json()
-            except brand_ai.AiUnavailableError as exc:
-                # Budget spent or no provider: the rest of this run goes without.
-                ai_down = True
-                summary["ai_unavailable"] += 1
-                logger.info("brand discovery: AI unavailable from %r on: %s", c["name"], exc)
-        elif not ai:
-            asked += 1
         if c["ai"]:
             c["name"] = c["ai"]["canonical_name"] or c["name"]
             c["category"] = c["ai"]["category"]
