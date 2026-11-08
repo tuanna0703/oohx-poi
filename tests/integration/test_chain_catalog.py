@@ -360,3 +360,59 @@ async def test_concung_online_prices_at_a_virtual_store(monkeypatch: pytest.Monk
                 await s.execute(text(f"DELETE FROM {t} WHERE chain = 'concung'"))
             await s.commit()
             await _cleanup(s, tag)
+
+
+async def test_price_moves_list_what_changed_against_the_day_before() -> None:
+    from datetime import date
+
+    sm = get_sessionmaker()
+    tag = "pm-" + uuid.uuid4().hex[:6]
+    chain = f"test-{tag}"
+    d1, d2 = date(2026, 11, 7), date(2026, 11, 8)
+    async with sm() as s:
+        key, _ = await _make_client(s, tag)
+        for sku, name in (("1", "Sữa A"), ("2", "Tã B"), ("3", "Bánh C"), ("4", "Mới D")):
+            await s.execute(text(
+                "INSERT INTO chain_products (chain, sku, name, name_folded, brand, category_path) "
+                "VALUES (:c, :s, :n, :n, 'Brand', ARRAY['Nhóm', 'Loại'])"
+            ), {"c": chain, "s": sku, "n": name})
+        rows = [  # sku, day, mode price, regular, on_sale
+            ("1", d1, 100000, 100000, 0), ("1", d2, 80000, 100000, 1),   # down 20%, promo starts
+            ("2", d1, 200000, 200000, 0), ("2", d2, 210000, 210000, 0),  # up 5%
+            ("3", d1, 50000, 60000, 1), ("3", d2, 50000, 50000, 0),      # same price, promo ends
+            ("4", d2, 30000, 30000, 0),                                    # new: not a move
+        ]
+        for sku, day, price, regular, sale in rows:
+            await s.execute(text(
+                "INSERT INTO chain_price_daily (chain, sku, day, stores, on_sale, min_price, mode_price, "
+                "max_price, regular_price) VALUES (:c, :s, :d, 1, :o, :p, :p, :p, :r)"
+            ), {"c": chain, "s": sku, "d": day, "o": sale, "p": price, "r": regular})
+        await s.commit()
+    try:
+        async with await _http() as c:
+            h = {"X-API-Key": key}
+            r = await c.get(f"/api/v1/catalog/{chain}/price-moves", headers=h)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["day"] == "2026-11-08" and body["previous_day"] == "2026-11-07"
+            assert (body["up"], body["down"], body["total"]) == (1, 1, 2)
+            assert (body["promos_started"], body["promos_ended"]) == (1, 1)
+            first, second = body["items"]
+            assert (first["sku"], first["before"], first["after"], first["change"], first["change_pct"]) == (
+                "1", 100000, 80000, -20000, -20.0
+            ), "biggest move first"
+            assert first["on_sale_after"] and not first["on_sale_before"] and first["category"] == "Loại"
+            assert (second["sku"], second["change_pct"]) == ("2", 5.0)
+
+            up = (await c.get(f"/api/v1/catalog/{chain}/price-moves", params={"direction": "up"},
+                              headers=h)).json()
+            assert [i["sku"] for i in up["items"]] == ["2"] and up["total"] == 1
+            early = (await c.get(f"/api/v1/catalog/{chain}/price-moves", params={"day": "2026-11-07"},
+                                 headers=h)).json()
+            assert early["total"] == 0 and early["items"] == []
+    finally:
+        async with sm() as s:
+            await s.execute(text("DELETE FROM chain_price_daily WHERE chain = :c"), {"c": chain})
+            await s.execute(text("DELETE FROM chain_products WHERE chain = :c"), {"c": chain})
+            await s.commit()
+            await _cleanup(s, tag)

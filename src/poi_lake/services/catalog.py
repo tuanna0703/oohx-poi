@@ -807,3 +807,98 @@ async def product_prices(session: AsyncSession, chain: str, sku: str, days: int)
             for r in rows
         ],
     }
+
+
+PRICE_MOVE_DIRECTIONS = ("all", "up", "down")
+
+
+async def price_moves(
+    session: AsyncSession,
+    chain: str,
+    *,
+    day: date | None = None,
+    direction: str = "all",
+    page: int = 1,
+    per_page: int = 50,
+) -> dict[str, Any]:
+    """The products whose price (what most stores charge, sale price if on
+    sale) changed on ``day`` against the day before, biggest move first.
+
+    ``day`` defaults to the chain's latest summarised day. A product new or
+    gone that day is not a move; ``promos_started`` / ``promos_ended`` count
+    products whose sale began or ended."""
+    if day is None:
+        day = (
+            await session.execute(
+                text("SELECT max(day) FROM chain_price_daily WHERE chain = :c"), {"c": chain}
+            )
+        ).scalar_one()
+    if day is None:
+        return {"chain": chain, "day": None, "previous_day": None, "up": 0, "down": 0,
+                "promos_started": 0, "promos_ended": 0, "total": 0, "page": page,
+                "per_page": per_page, "items": []}
+    prev = day - timedelta(days=1)
+    pair = """
+        FROM chain_price_daily t
+        JOIN chain_price_daily y ON y.chain = t.chain AND y.sku = t.sku AND y.day = :p
+        WHERE t.chain = :c AND t.day = :d
+    """
+    params: dict[str, Any] = {"c": chain, "d": day, "p": prev}
+    counts = (
+        await session.execute(
+            text(
+                f"""
+                SELECT count(*) FILTER (WHERE t.mode_price > y.mode_price) AS up,
+                       count(*) FILTER (WHERE t.mode_price < y.mode_price) AS down,
+                       count(*) FILTER (WHERE t.on_sale > 0 AND y.on_sale = 0) AS promos_started,
+                       count(*) FILTER (WHERE t.on_sale = 0 AND y.on_sale > 0) AS promos_ended
+                {pair} AND y.mode_price > 0 AND t.mode_price IS NOT NULL
+                """
+            ),
+            params,
+        )
+    ).one()
+    cmp = {"up": "t.mode_price > y.mode_price", "down": "t.mode_price < y.mode_price"}.get(
+        direction, "t.mode_price <> y.mode_price"
+    )
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                SELECT t.sku, p.name, p.brand, p.category_path,
+                       y.mode_price AS before, t.mode_price AS after,
+                       y.regular_price AS regular_before, t.regular_price AS regular_after,
+                       y.on_sale > 0 AS sale_before, t.on_sale > 0 AS sale_after
+                FROM chain_price_daily t
+                JOIN chain_price_daily y ON y.chain = t.chain AND y.sku = t.sku AND y.day = :p
+                JOIN chain_products p ON p.chain = t.chain AND p.sku = t.sku
+                WHERE t.chain = :c AND t.day = :d
+                  AND y.mode_price > 0 AND t.mode_price IS NOT NULL AND {cmp}
+                ORDER BY abs(t.mode_price - y.mode_price) / y.mode_price DESC, t.sku
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {**params, "limit": per_page, "offset": (page - 1) * per_page},
+        )
+    ).all()
+    total = int(counts.up if direction == "up" else counts.down if direction == "down"
+                else counts.up + counts.down)
+    money = lambda v: int(v) if v is not None else None  # noqa: E731
+    return {
+        "chain": chain, "day": day.isoformat(), "previous_day": prev.isoformat(),
+        "up": int(counts.up), "down": int(counts.down),
+        "promos_started": int(counts.promos_started), "promos_ended": int(counts.promos_ended),
+        "total": total, "page": page, "per_page": per_page,
+        "items": [
+            {
+                "sku": r.sku, "name": r.name, "brand": r.brand,
+                "category": (list(r.category_path or []) or [None])[-1],
+                "before": money(r.before), "after": money(r.after),
+                "change": money(r.after - r.before),
+                "change_pct": round(100 * (float(r.after) - float(r.before)) / float(r.before), 1),
+                "regular_before": money(r.regular_before), "regular_after": money(r.regular_after),
+                "on_sale_before": bool(r.sale_before), "on_sale_after": bool(r.sale_after),
+            }
+            for r in rows
+        ],
+    }
