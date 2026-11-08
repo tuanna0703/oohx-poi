@@ -13,6 +13,7 @@ class Chain:
     brands: tuple[str, ...]  # the brand names its masters carry
     category: tuple[str, str]  # OpenOOH (top, sub) for a store we add
     products: bool  # whether we read what each store lists online
+    online_only: bool = False  # one price online, no store list (a virtual "online" store)
 
 
 CHAINS: dict[str, Chain] = {
@@ -23,6 +24,12 @@ CHAINS: dict[str, Chain] = {
     "bachhoaxanh": Chain(
         "bachhoaxanh", "Bách Hoá Xanh", ("Bach Hoa Xanh",),
         ("retail", "retail.grocery"), products=False,
+    ),
+    # Online prices only, at one virtual store (catalog/concung.py): no
+    # store list, no store matched to a master.
+    "concung": Chain(
+        "concung", "Con Cưng", ("Con Cưng",),
+        ("retail", "retail.mother_baby"), products=True, online_only=True,
     ),
 }
 

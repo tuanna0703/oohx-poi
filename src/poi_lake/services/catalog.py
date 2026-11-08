@@ -59,6 +59,30 @@ def street_key(address: str | None) -> str | None:
     return " ".join(words)
 
 
+async def ensure_online_store(session: AsyncSession, chain: str, label: str) -> str:
+    """The virtual store an online-only chain's prices are listed at.
+
+    Type ``ONLINE`` and never matched to a master. Its location is (0, 0),
+    outside Vietnam, so no query by place ever returns it."""
+    from poi_lake.catalog.concung import ONLINE_STORE
+
+    await session.execute(
+        text(
+            """
+            INSERT INTO chain_stores (chain, store_code, name, store_type, location, raw,
+                first_seen_at, last_seen_at, active)
+            VALUES (:chain, :code, :name, 'ONLINE', ST_GeogFromText('SRID=4326;POINT(0 0)'),
+                '{}'::jsonb, now(), now(), true)
+            ON CONFLICT (chain, store_code) DO UPDATE SET
+                last_seen_at = now(), active = true, store_type = 'ONLINE'
+            """
+        ),
+        {"chain": chain, "code": ONLINE_STORE, "name": f"{label} online"},
+    )
+    await session.commit()
+    return ONLINE_STORE
+
+
 async def seed_points(
     session: AsyncSession, chain: str, brands: Sequence[str]
 ) -> list[tuple[float, float]]:
@@ -68,7 +92,7 @@ async def seed_points(
             text(
                 """
                 SELECT ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lng
-                FROM chain_stores WHERE chain = :chain
+                FROM chain_stores WHERE chain = :chain AND store_type IS DISTINCT FROM 'ONLINE'
                 UNION ALL
                 SELECT ST_Y(location::geometry), ST_X(location::geometry)
                 FROM master_pois WHERE status = 'active' AND brand = ANY(:brands)
@@ -153,7 +177,7 @@ async def match_stores(
                     ORDER BY m.location <-> s.location
                     LIMIT 5
                 ) m
-                WHERE s.chain = :chain AND s.active
+                WHERE s.chain = :chain AND s.active AND s.store_type IS DISTINCT FROM 'ONLINE'
                 ORDER BY d
                 """
             ),
@@ -186,6 +210,7 @@ async def match_stores(
                     LIMIT 8
                 ) m
                 WHERE s.chain = :chain AND s.active AND NOT (s.store_code = ANY(:taken))
+                  AND s.store_type IS DISTINCT FROM 'ONLINE'
                 ORDER BY d
                 """
             ),
@@ -237,6 +262,7 @@ async def missing_stores(
                     ORDER BY m.location <-> s.location LIMIT 1
                 ) n ON true
                 WHERE s.chain = :chain AND s.active AND s.master_id IS NULL
+                  AND s.store_type IS DISTINCT FROM 'ONLINE'
                   AND (n.d IS NULL OR n.d >= :min_m)
                 ORDER BY s.region_code, s.store_code
                 """
@@ -562,10 +588,13 @@ async def master_products(
 
 
 # Stores whose listing counts: linked to a master and read at least once.
-_LISTED = (
-    "JOIN chain_stores s ON s.chain = sp.chain AND s.store_code = sp.store_code "
-    "AND s.active AND s.master_id IS NOT NULL AND s.items_crawled_at IS NOT NULL"
+# A store counts once it is read and either linked to a master or the chain's
+# virtual online store (an online-only chain such as Con Cưng).
+_COUNTED = (
+    "s.active AND (s.master_id IS NOT NULL OR s.store_type = 'ONLINE') "
+    "AND s.items_crawled_at IS NOT NULL"
 )
+_LISTED = f"JOIN chain_stores s ON s.chain = sp.chain AND s.store_code = sp.store_code AND {_COUNTED}"
 
 
 async def chain_products(
@@ -583,10 +612,7 @@ async def chain_products(
     stores = int(
         (
             await session.execute(
-                text(
-                    "SELECT count(*) FROM chain_stores WHERE chain = :chain AND active "
-                    "AND master_id IS NOT NULL AND items_crawled_at IS NOT NULL"
-                ),
+                text(f"SELECT count(*) FROM chain_stores s WHERE s.chain = :chain AND {_COUNTED}"),
                 key,
             )
         ).scalar_one()

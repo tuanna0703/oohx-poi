@@ -194,6 +194,7 @@ def _start_catalog_scheduler() -> None:
                 build_daily_report,
                 queue_winmart_items,
                 refresh_bachhoaxanh,
+                refresh_concung,
                 refresh_winmart,
                 snapshot_prices,
             )
@@ -207,6 +208,8 @@ def _start_catalog_scheduler() -> None:
                 iw = int(now // items_s)
                 if r.set(f"poi-lake:scheduler:catalog-items:{iw}", "1", ex=items_s + 10, nx=True):
                     queue_winmart_items.send()
+                    if settings.catalog_concung_enabled:
+                        refresh_concung.send()
                     logger.info("scheduled catalog items crawl enqueued (window=%d)", iw)
             hw = int(now // 3600)
             if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):

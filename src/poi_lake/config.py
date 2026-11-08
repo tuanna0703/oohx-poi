@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # The chain's own province codes whose stores get their products crawled
     # ("HCM,HNI"), or "*" for every store.
     catalog_winmart_regions: str = Field(default="HCM", alias="CATALOG_WINMART_REGIONS")
+    # Con Cưng's online prices (concung.com category pages). Off unless turned
+    # on: the site's terms forbid copying its content without written consent,
+    # so whoever runs it decides. The admin refresh endpoint runs it on demand.
+    catalog_concung_enabled: bool = Field(default=False, alias="CATALOG_CONCUNG_ENABLED")
+    # concung.com answers slowly (~5 KB/s seen): seconds between its requests.
+    catalog_concung_interval_s: float = Field(default=3.0, alias="CATALOG_CONCUNG_INTERVAL_S")
 
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")
