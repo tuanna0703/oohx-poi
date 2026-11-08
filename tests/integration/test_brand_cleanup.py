@@ -1,5 +1,6 @@
 """Brand clean-up: a dry run writes nothing; apply untags stores that do not
-carry their brand, disables a generic "chain", and undo puts it all back."""
+carry their brand, disables a "chain" none of whose stores carries its
+name, and undo puts it all back."""
 
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ async def test_cleanup_plan_apply_and_undo() -> None:
     generic = f"Phở Gia Truyền {w}"  # tagged through the alias "Gia Truyền"
     cinema = f"{w} Cinema"  # tagged through the alias "<w>"
     seeds = (
-        [(generic, f"Nhà thuốc Gia Truyền {i}") for i in range(4)] + [(generic, f"Phở Gia Truyền {w}")]
+        [(generic, f"Nhà thuốc Gia Truyền {i}") for i in range(4)]
         + [(cinema, f"{w} Cinema 1")] + [(cinema, f"Karaoke {w} {i}") for i in range(3)]
     )
     sm = get_sessionmaker()
@@ -45,10 +46,10 @@ async def test_cleanup_plan_apply_and_undo() -> None:
         async with sm() as s:
             dry = await brand_cleanup.plan(s)
         mine = {b["brand"]: b for b in dry["brands"] if b["brand"] in (generic, cinema)}
-        assert (mine[generic]["action"], mine[generic]["untag_masters"]) == ("disable", 5)
-        assert (mine[cinema]["action"], mine[cinema]["untag_masters"]) == ("trim", 3)
+        assert (mine[generic]["action"], mine[generic]["untag_masters"]) == ("disable", 4)
+        assert (mine[cinema]["action"], mine[cinema]["untag_masters"], mine[cinema]["kept_masters"]) == ("trim", 3, 1)
         assert mine[cinema]["drop_aliases"] == [w]
-        assert await _tags([generic, cinema]) == {generic: 5, cinema: 4}, "a dry run writes nothing"
+        assert await _tags([generic, cinema]) == {generic: 4, cinema: 4}, "a dry run writes nothing"
 
         async with sm() as s:
             done = await brand_cleanup.apply(s)
@@ -65,8 +66,8 @@ async def test_cleanup_plan_apply_and_undo() -> None:
         async with sm() as s:
             back = await brand_cleanup.undo(s, done["run_id"])
             await s.commit()
-        assert back["masters"] >= 8
-        assert await _tags([generic, cinema]) == {generic: 5, cinema: 4}
+        assert back["masters"] >= 7
+        assert await _tags([generic, cinema]) == {generic: 4, cinema: 4}
         async with sm() as s:
             enabled = (await s.execute(text("SELECT enabled FROM brands WHERE name = :b"), {"b": generic})).scalar_one()
         assert enabled is True
