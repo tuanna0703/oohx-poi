@@ -613,7 +613,10 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
                                             "text": "AI đánh giá là cờ bạc, người lớn hoặc hàng cấm: cần người duyệt"}]
             if c["status"] == "auto_added":
                 c["status"] = "pending"
-        why = script_reason(c["name"])
+        # The name as found too: the AI may give "中国建设银行" a Latin canonical
+        # name, but the stored row keeps the first one (_store does not update
+        # names) and apply() adds the stored name.
+        why = script_reason(c["original"]) or script_reason(c["name"])
         if why:
             c["signals"] = [*c["signals"], {"label": SCRIPT_LABEL, "good": False,
                                             "text": f"{why}: cần người duyệt"}]

@@ -245,9 +245,12 @@ async def test_gambling_is_never_added_and_an_ai_flag_waits(monkeypatch: pytest.
     tag = "bdx-" + uuid.uuid4().hex[:6]
     bet = "Okvip" + uuid.uuid4().hex[:4]
     flagged = "Luckrix" + uuid.uuid4().hex[:4]
+    # Khmer splits into one-letter words around its vowel signs; a word of
+    # consonants after it makes this run's key unique.
+    khmer = "ដេប៉ូ " + "".join("កខគឃងចឆជឈញដឋឌឍណត"[int(ch, 16)] for ch in uuid.uuid4().hex[:5])
     sm = get_sessionmaker()
     async with sm() as s:
-        for name in (bet, flagged):
+        for name in (bet, flagged, khmer):
             for i in range(10):
                 mid = await _seed_master(s, name=f"{name} {i}", lat=10.8 + i / 100, lng=106.7,
                                          test_tag=tag, category="entertainment")
@@ -258,6 +261,7 @@ async def test_gambling_is_never_added_and_an_ai_flag_waits(monkeypatch: pytest.
         await s.commit()
 
     real = app_settings.discovery
+    khmer_keys: list[str] = []
 
     async def discovery(session):  # type: ignore[no-untyped-def]
         return {**await real(session), "auto_add": True, "add_at": 1, "reject_below": 0,
@@ -267,11 +271,15 @@ async def test_gambling_is_never_added_and_an_ai_flag_waits(monkeypatch: pytest.
         got = {}
         for c in cands:
             name = {bet.lower(): bet, flagged.lower(): flagged}.get(c["key"])
-            if name:
+            if name or brand_discovery.script_reason(c["name"]):
+                # The Khmer chain gets a Latin canonical name: it must still wait.
                 got[c["key"]] = brand_ai.Verdict(
                     provider="claude", model="fake", is_chain=True, confidence=1.0,
-                    canonical_name=name, category="entertainment", parent_company=None,
-                    aliases=[], search_term=name, note="", sensitive=name == flagged)
+                    canonical_name=name or "Depot Tela", category="entertainment",
+                    parent_company=None, aliases=[], search_term=name or "Depot Tela", note="",
+                    sensitive=name == flagged)
+                if not name:
+                    khmer_keys.append(c["key"])
         return got, None
 
     monkeypatch.setattr(brand_discovery.app_settings, "discovery", discovery)
@@ -289,8 +297,20 @@ async def test_gambling_is_never_added_and_an_ai_flag_waits(monkeypatch: pytest.
             )).scalar_one()
         assert rows == {bet.lower(): "auto_rejected", flagged.lower(): "pending"}
         assert added == 0
+        assert khmer_keys, "the Khmer chain was a candidate"
+        async with sm() as s:
+            khmer_rows = (await s.execute(
+                text("SELECT status FROM brand_candidates WHERE key = ANY(:k)"), {"k": khmer_keys}
+            )).scalars().all()
+            khmer_added = (await s.execute(
+                text("SELECT count(*) FROM brands WHERE name = ANY(:n)"), {"n": [khmer, "Depot Tela"]}
+            )).scalar_one()
+        assert set(khmer_rows) == {"pending"} and khmer_added == 0
     finally:
         for name in (bet, flagged):
             await _forget(name, name.lower())
+        async with sm() as s:
+            await s.execute(text("DELETE FROM brand_candidates WHERE key = ANY(:k)"), {"k": khmer_keys})
+            await s.commit()
         async with sm() as s:
             await _cleanup(s, tag)
