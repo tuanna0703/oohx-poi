@@ -183,18 +183,24 @@ async def test_ai_per_run_sets_how_many_verdicts_a_run_asks(monkeypatch: pytest.
         await s.commit()
 
     real = app_settings.discovery
-    per_run = {"n": 0}
+    per_run: dict[str, int] = {"n": 0, "cut": 0}
     asked: list[list[str]] = []
 
     async def discovery(session):  # type: ignore[no-untyped-def]
         return {**await real(session), "auto_add": False, "ai_per_run": per_run["n"]}
 
-    async def verify_many(session, cands, settings=None, **_):  # type: ignore[no-untyped-def]
+    async def verify_many(session, cands, settings=None, *, on_round=None, **_):  # type: ignore[no-untyped-def]
         asked.append([c["key"] for c in cands])
         verdict = brand_ai.Verdict(provider="claude", model="fake", is_chain=True, confidence=0.9,
                                    canonical_name=brand, category="retail", parent_company=None,
                                    aliases=[], search_term=brand, note="")
-        return {c["key"]: verdict for c in cands if c["key"] == key}, None
+        got = {c["key"]: verdict for c in cands if c["key"] == key}
+        if on_round:
+            await on_round(got)
+        await session.commit()
+        if per_run.get("cut"):
+            raise TimeoutError("time limit")  # the actor stopped after this round
+        return got, None
 
     monkeypatch.setattr(brand_discovery.app_settings, "discovery", discovery)
     monkeypatch.setattr(brand_discovery.brand_ai, "verify_many", verify_many)
@@ -210,14 +216,21 @@ async def test_ai_per_run_sets_how_many_verdicts_a_run_asks(monkeypatch: pytest.
         assert asked == []
         assert await row() == ("new", None)
 
-        per_run["n"] = 5000
+        per_run.update(n=5000, cut=1)
         async with sm() as s:
-            result = await brand_discovery.run(s)
-        assert len(asked) == 1 and key in asked[0], "one batch, this chain in it"
+            with pytest.raises(TimeoutError):
+                await brand_discovery.run(s)
+        status, ai = await row()
+        assert status == "new" and isinstance(ai, dict), "a run cut short keeps the verdicts it paid for"
+
+        per_run["cut"] = 0
+        async with sm() as s:
+            await brand_discovery.run(s)
+        assert key in asked[0]
+        assert all(key not in a for a in asked[1:]), "the kept verdict is not asked (or paid for) again"
         status, ai = await row()
         assert status == "pending"
         assert isinstance(ai, dict) and ai["model"] == "fake"
-        assert result["ai_asked"] >= 1
     finally:
         await _forget(brand, key)
         async with sm() as s:

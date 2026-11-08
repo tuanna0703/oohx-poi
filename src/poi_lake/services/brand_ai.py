@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -277,12 +278,14 @@ async def verify_many(
     settings: dict[str, Any] | None = None,
     *,
     concurrency: int = AI_CONCURRENCY,
+    on_round: Callable[[dict[str, Verdict]], Awaitable[None]] | None = None,
 ) -> tuple[dict[str, Verdict], str | None]:
     """Verdicts for many candidates, ``concurrency`` at a time, by ``key``.
 
     Goes in rounds of ``concurrency``: the budget is checked before each round
     (so it can be overshot by at most one round) and every call is logged and
-    committed after it. Stops at the first candidate no provider could answer,
+    committed after it, with what ``on_round`` writes for that round's
+    verdicts (so a run cut short keeps what it paid for). Stops at the first candidate no provider could answer,
     or when the budget is spent, and says why as the second value; the
     verdicts already back are kept.
     """
@@ -295,12 +298,16 @@ async def verify_many(
         chunk = candidates[i: i + step]
         rounds = await asyncio.gather(*(asyncio.to_thread(_ask, settings, c) for c in chunk))
         failed: str | None = None
+        got: dict[str, Verdict] = {}
         for c, asked in zip(chunk, rounds, strict=True):
             await _logged(session, asked)
             if asked.verdict is not None:
-                out[c["key"]] = asked.verdict
+                got[c["key"]] = asked.verdict
             elif failed is None:
                 failed = f"{c['name']}: " + ("; ".join(asked.errors) or "no provider configured")
+        if on_round and got:
+            await on_round(got)
+        out.update(got)
         await session.commit()
         if failed:
             return out, failed

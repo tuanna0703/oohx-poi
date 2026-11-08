@@ -464,8 +464,19 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
     to_ask = [c for c in open_ if not decided.get(c["key"], (None, None))[1]][: int(settings["ai_per_run"])]
     turn = {c["key"] for c in to_ask}
     verdicts: dict[str, brand_ai.Verdict] = {}
+    by_key = {c["key"]: c for c in to_ask}
+
+    async def keep(got: dict[str, brand_ai.Verdict]) -> None:
+        # Each round's verdicts are stored as they come (as "new", out of the
+        # review list, unless already pending): a run cut short by the time
+        # limit leaves them for the next one instead of asking (and paying) again.
+        for k, v in got.items():
+            c = by_key[k]
+            await _store(session, {**c, "ai": v.as_json(), "score": c["rules"],
+                                   "status": decided.get(k, ("new", None))[0] or "new"})
+
     if use_ai and to_ask:
-        verdicts, why_down = await brand_ai.verify_many(session, to_ask, settings)
+        verdicts, why_down = await brand_ai.verify_many(session, to_ask, settings, on_round=keep)
         if why_down:
             # Budget spent or no provider: the rest of this run goes without.
             summary["ai_unavailable"] += 1
@@ -522,6 +533,7 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
             await apply(session, int(cid), batch=batch, status="auto_added")
         await session.commit()
         summary[c["status"]] += 1
+    await session.commit()  # the "new" ones, stored without a commit of their own
     summary["found"] = len(found)
     logger.info("brand discovery: %s", dict(summary))
     return {**dict(summary), "batch": batch}

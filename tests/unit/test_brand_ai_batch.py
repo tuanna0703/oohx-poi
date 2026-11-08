@@ -62,8 +62,16 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 async def test_many_verdicts_come_back_several_at_a_time(fake: dict[str, Any]) -> None:
     s = _Session()
     settings = {**DEFAULTS, "budget_usd": 1000.0}
-    verdicts, why = await brand_ai.verify_many(s, _cands(20), settings, concurrency=8)  # type: ignore[arg-type]
+    rounds: list[int] = []
+
+    async def on_round(got: dict[str, brand_ai.Verdict]) -> None:
+        rounds.append(len(got))
+        assert s.commits == len(rounds) - 1, "stored before the round's commit"
+
+    verdicts, why = await brand_ai.verify_many(  # type: ignore[arg-type]
+        s, _cands(20), settings, concurrency=8, on_round=on_round)
     assert why is None
+    assert rounds == [8, 8, 4]
     assert sorted(verdicts) == sorted(f"k{i}" for i in range(20))
     assert verdicts["k3"].canonical_name == "Chain 3"
     assert 1 < fake["peak"] <= 8
