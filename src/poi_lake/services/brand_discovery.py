@@ -40,6 +40,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from rapidfuzz import fuzz, process
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -574,8 +575,11 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
     # One candidate per chain: "Hoarosa" and "Hoarosa Shop Hoa", "DongA Bank" and
     # "Donga Bank" are the same once the AI names them. And a chain the
     # dictionary already has ("MB ATM" is MB Bank) is offered as a merge.
-    known = {_folded(n): n for (n,) in (await session.execute(text("SELECT name FROM brands"))).all()}
+    known = BrandMatcher()
+    for n, aliases in (await session.execute(text("SELECT name, aliases FROM brands"))).all():
+        known.add(n, *(aliases or []))
     kept: dict[str, dict[str, Any]] = {}
+    kept_names = BrandMatcher(strict=True)
     for c in open_:
         ai = decided.get(c["key"], (None, None))[1]
         if not ai and c["key"] in verdicts:
@@ -622,19 +626,21 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
                                             "text": f"{why}: cần người duyệt"}]
             if c["status"] == "auto_added":
                 c["status"] = "pending"
-        chain = _folded(c["name"])
-        if c["ai"] and chain in known:
-            c["ai"]["existing_brand"] = known[chain]
+        existing = known.find(c["name"], c["original"]) if c["ai"] else None
+        twin = kept_names.find(c["name"]) if c["ai"] else None
+        if existing:
+            c["ai"]["existing_brand"] = existing
             if c["status"] == "auto_added":
                 c["status"] = "pending"  # merging into a brand is an admin's call
-        elif c["ai"] and chain in kept and c["status"] != "auto_rejected":
-            first = kept[chain]
+        elif twin and c["status"] != "auto_rejected":
+            first = kept[twin]
             c["status"] = "auto_rejected"
             c["signals"] = [*c["signals"], {"label": "Trùng", "good": False,
                                             "text": f"cùng chuỗi với ứng viên {first['name']}"}]
             await _add_alias(session, first["key"], c["original"])
         elif c["ai"] and c["status"] != "auto_rejected":
-            kept[chain] = c
+            kept[c["name"]] = c
+            kept_names.add(c["name"])
         await _store(session, c)
         if c["status"] == "auto_added":
             cid = (await session.execute(
@@ -651,6 +657,89 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
 
 def _folded(name: str) -> str:
     return " ".join(tokens(name)[0])
+
+
+# Words a brand's legal or long name adds to it: "ACLEDA Bank Plc" is ACLEDA,
+# "Vietcom Bank" is Vietcombank. They also mark a name whose initials may be
+# its short form ("Saigon Commercial Bank" is SCB).
+ORG_WORDS = frozenset((
+    "bank", "tmcp", "plc", "jsc", "ltd", "company", "tnhh", "group", "corp", "corporation",
+    "inc", "limited", "holding", "holdings",
+))
+# Vietnamese ones are two words, dropped only together: "hang" alone is Hằng.
+ORG_PHRASES = (("ngan", "hang"), ("cong", "ty"), ("tap", "doan"))
+FUZZY_MIN = 93      # rapidfuzz ratio on compact keys of 8+ letters: "Highland Coffee" ~ "Highlands Coffee"
+FUZZY_MIN_LEN = 8
+
+
+def _org_words(words: list[str]) -> list[bool]:
+    """Which of the folded words are company words ("ngan hang" counts as two)."""
+    org = [w in ORG_WORDS for w in words]
+    for i in range(len(words) - 1):
+        if (words[i], words[i + 1]) in ORG_PHRASES:
+            org[i] = org[i + 1] = True
+    return org
+
+
+def compact_key(name: str) -> str:
+    """The name folded, its company words dropped, glued: "ACLEDA Bank Plc" → "acleda"."""
+    words = tokens(name)[0]
+    key = "".join(w for w, org in zip(words, _org_words(words), strict=True) if not org)
+    if key.endswith("bank") and len(key) > 6:  # "vietcombank", glued
+        key = key[:-4]
+    return key
+
+
+def acronym(name: str) -> str | None:
+    """The initials of a long company name ("Saigon Commercial Bank" → "scb"), or ``None``."""
+    words = tokens(name)[0]
+    if len(words) < 3 or not any(_org_words(words)):
+        return None
+    return "".join(w[0] for w in words if w not in {"of", "for", "and", "the", "va"})
+
+
+class BrandMatcher:
+    """Finds the brand a candidate's name is another spelling of.
+
+    ``strict`` matches compact keys only (used between this run's candidates,
+    where a match rejects one of them); otherwise acronyms and near spellings
+    also match (used against the dictionary, where a match only holds the
+    candidate for an admin to merge).
+    """
+
+    def __init__(self, *, strict: bool = False) -> None:
+        self.strict = strict
+        self.by_key: dict[str, str] = {}
+        self.by_acronym: dict[str, str] = {}
+
+    def add(self, name: str, *spellings: str) -> None:
+        for s in (name, *spellings):
+            k = compact_key(s)
+            if len(k) >= 2:
+                self.by_key.setdefault(k, name)
+            a = acronym(s)
+            if a and len(a) >= 3:
+                self.by_acronym.setdefault(a, name)
+
+    def find(self, *names: str) -> str | None:
+        for name in names:
+            k = compact_key(name or "")
+            if len(k) < 2:
+                continue
+            if k in self.by_key:
+                return self.by_key[k]
+            if self.strict:
+                continue
+            if k in self.by_acronym:            # "SCB" against "Saigon Commercial Bank"
+                return self.by_acronym[k]
+            a = acronym(name)
+            if a and a in self.by_key:          # "Saigon Commercial Bank" against "SCB"
+                return self.by_key[a]
+            if len(k) >= FUZZY_MIN_LEN:
+                hit = process.extractOne(k, self.by_key.keys(), scorer=fuzz.ratio, score_cutoff=FUZZY_MIN)
+                if hit:
+                    return self.by_key[hit[0]]
+        return None
 
 
 async def _add_alias(session: AsyncSession, key: str, alias: str) -> None:

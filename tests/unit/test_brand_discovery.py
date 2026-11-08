@@ -5,7 +5,10 @@ from __future__ import annotations
 from poi_lake.services import brand_ai
 from poi_lake.services.app_settings import DEFAULTS
 from poi_lake.services.brand_discovery import (
+    BrandMatcher,
+    acronym,
     blocked_by,
+    compact_key,
     decide,
     fold,
     generic_reason,
@@ -178,3 +181,40 @@ def test_ai_verdict_carries_sensitive() -> None:
     assert v.sensitive is True and v.as_json()["sensitive"] is True
     assert brand_ai._verdict("claude", "m", {"is_chain": True}, "X").sensitive is False
     assert "sensitive" in brand_ai.VERDICT_SCHEMA["required"]
+
+
+def test_compact_keys_drop_company_words() -> None:
+    assert compact_key("ACLEDA Bank Plc") == compact_key("ACLEDA") == "acleda"
+    assert compact_key("Vietcom Bank") == compact_key("Vietcombank") == "vietcom"
+    assert compact_key("Ngân hàng Đông Á") == "donga"
+    assert compact_key("Thu Hằng Shop") == "thuhangshop", "hang alone is a name, not a company word"
+    assert acronym("Saigon Commercial Bank") == "scb"
+    assert acronym("Bank for Investment and Development of Vietnam") == "bidv"
+    assert acronym("Lakaa Tea & Coffee") is None, "no company word: initials mean nothing"
+
+
+def test_another_spelling_of_a_known_brand_is_found() -> None:
+    m = BrandMatcher()
+    for name, aliases in (("ACLEDA", []), ("SCB", []), ("Vietcombank", []), ("Highlands Coffee", []),
+                          ("Agribank", ["Vietnam Bank for Agriculture and Rural Development"]),
+                          ("BIDV", []), ("MB Bank", [])):
+        m.add(name, *aliases)
+    assert m.find("ACLEDA Bank Plc") == "ACLEDA"
+    assert m.find("Saigon Commercial Bank") == "SCB"
+    assert m.find("Vietcom Bank") == "Vietcombank"
+    assert m.find("Highland Coffee") == "Highlands Coffee"
+    assert m.find("Vietnam Bank For Agriculture And Rural Development") == "Agribank"
+    assert m.find("Bank for Investment and Development of Vietnam") == "BIDV"
+    assert m.find("MB") == "MB Bank"
+    for other in ("An Coffee Bar", "Highlands Tea", "Mono", "Lakaa Tea & Coffee", "Thu Hằng Shop"):
+        assert m.find(other) is None, other
+
+
+def test_strict_matching_between_candidates_takes_compact_keys_only() -> None:
+    m = BrandMatcher(strict=True)
+    m.add("ACLEDA")
+    m.add("SCB")
+    assert m.find("ACLEDA Bank Plc") == "ACLEDA"
+    assert m.find("Saigon Commercial Bank") is None
+    m.add("Highlands Coffee")
+    assert m.find("Highland Coffee") is None
