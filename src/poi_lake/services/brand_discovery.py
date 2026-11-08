@@ -276,6 +276,86 @@ def decide(cand: dict[str, Any], settings: dict[str, Any]) -> str:
 
 
 GENERIC_LABEL = "Tên chung chung"
+SENSITIVE_LABEL = "Nhạy cảm"
+SCRIPT_LABEL = "Chữ không phải Latin"
+
+# Gambling, betting, adult. Vietnamese phrases match with their accents (a
+# run of the name's words, lower case): folded, "cá độ" would be "Cà Đỗ" and
+# "bết" "bet". The accent-free ones below match a name typed without any
+# accent ("Nha Cai Uy Tin"). A site name also matches the start
+# of a word ("okvip88").
+SENSITIVE_ACCENTED: tuple[tuple[str, ...], ...] = tuple(
+    tuple(p.split()) for p in (
+        "cá cược", "cá độ", "lô đề", "nổ hũ", "nhà cái", "tài xỉu", "xóc đĩa", "game bài",
+        "đánh bài", "bài đổi thưởng", "khiêu dâm",
+    )
+)
+SENSITIVE_FOLDED: tuple[tuple[str, ...], ...] = tuple(
+    tuple(p.split()) for p in ("nha cai", "ca cuoc", "tai xiu", "xoc dia", "game bai", "danh bai")
+)
+SENSITIVE_ENGLISH: tuple[tuple[str, ...], ...] = tuple(  # in any name, accents or not
+    tuple(p.split()) for p in ("casino", "betting", "bookmaker", "sex shop")
+)
+SENSITIVE_WORDS = frozenset({"bet", "sex"})  # as written, no accent: "Bết" is not "bet"
+SENSITIVE_SITES: tuple[str, ...] = (
+    "okvip", "kubet", "8xbet", "w88", "fb88", "jun88", "hi88", "new88", "sv388", "789bet",
+    "789club", "f8bet", "shbet", "188bet", "12bet", "m88", "fun88", "v9bet", "five88",
+    "bk8", "33win", "789win", "hb88", "nhacai", "cacuoc", "taixiu", "nohu", "gamebai",
+)
+
+# Unicode script names (first word of a letter's name) in Vietnamese.
+_SCRIPTS = {
+    "KHMER": "Khmer", "CJK": "Hán", "THAI": "Thái", "LAO": "Lào", "HANGUL": "Hàn",
+    "HIRAGANA": "Nhật", "KATAKANA": "Nhật", "CYRILLIC": "Kirin", "ARABIC": "Ả Rập",
+    "MYANMAR": "Miến Điện", "DEVANAGARI": "Devanagari",
+}
+
+
+def _has_run(words: list[str], phrase: tuple[str, ...]) -> bool:
+    n = len(phrase)
+    return any(tuple(words[i: i + n]) == phrase for i in range(len(words) - n + 1))
+
+
+def sensitive_reason(*names: str) -> str | None:
+    """Why a name reads as gambling, betting or adult, or ``None``."""
+    for name in names:
+        folded, original = tokens(name or "")
+        lower = [w.lower() for w in original]
+        for w in folded:
+            site = next((x for x in SENSITIVE_SITES if w.startswith(x)), None)
+            if site:
+                return f'tên trang cá cược "{site}"'
+        hit = next((w for w in lower if w in SENSITIVE_WORDS), None)
+        if hit:
+            return f'chứa từ cờ bạc hoặc người lớn ("{hit}")'
+        # Accent-free phrases only for a name typed without accents: "Nhà Cải Tạo"
+        # folds to "nha cai tao" too.
+        plain = folded == lower
+        for words, phrases in ((lower, SENSITIVE_ACCENTED), (folded, SENSITIVE_ENGLISH),
+                               (folded if plain else [], SENSITIVE_FOLDED)):
+            phrase = next((p for p in phrases if _has_run(words, p)), None)
+            if phrase:
+                return f'chứa từ cờ bạc hoặc người lớn ("{" ".join(phrase)}")'
+    return None
+
+
+def script_reason(name: str) -> str | None:
+    """Why a name is mostly not in Latin letters (Khmer, Han, Thai…), or ``None``."""
+    letters = [ch for ch in unicodedata.normalize("NFC", name or "") if ch.isalpha()]
+    if not letters:
+        return None
+    other = Counter(unicodedata.name(ch, "OTHER").split()[0] for ch in letters
+                    if "LATIN" not in unicodedata.name(ch, ""))
+    if sum(other.values()) * 2 <= len(letters):
+        return None
+    script = other.most_common(1)[0][0]
+    return f"tên viết bằng chữ {_SCRIPTS.get(script, script.title())}"
+
+
+def _names(cand: dict[str, Any]) -> list[str]:
+    ai = cand.get("ai") or {}
+    return [cand.get("name") or "", cand.get("original") or "", ai.get("canonical_name") or "",
+            *(cand.get("aliases") or [])]
 
 
 def blocked_by(cand: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -283,9 +363,10 @@ def blocked_by(cand: dict[str, Any], settings: dict[str, Any]) -> list[dict[str,
 
     ``None`` for a candidate already settled (added, rejected, removed). Each
     reason is ``{"code": …}`` plus what the candidate has and what it needs:
-    the five tests of ``decide`` and the two holds of ``run`` (a generic name,
-    a chain the dictionary already has). An empty list means nothing blocks
-    it: the next pass will add it.
+    the five tests of ``decide`` and the holds of ``run`` (a generic name, a
+    chain the dictionary already has, a gambling/adult name or an AI
+    ``sensitive`` verdict, a name not in Latin letters). An empty list means
+    nothing blocks it: the next pass will add it.
     """
     if cand.get("status") not in ("new", "pending"):
         return None
@@ -307,6 +388,14 @@ def blocked_by(cand: dict[str, Any], settings: dict[str, Any]) -> list[dict[str,
             reason = str(s.get("text") or "").removesuffix(": cần người duyệt")
             out.append({"code": "generic", "reason": reason})
             break
+    why = sensitive_reason(*_names(cand))
+    if why:
+        out.append({"code": "sensitive", "reason": why})
+    elif ai and ai.get("sensitive"):
+        out.append({"code": "sensitive", "reason": "AI đánh giá là cờ bạc, người lớn hoặc hàng cấm"})
+    why = script_reason(cand.get("name") or "")
+    if why:
+        out.append({"code": "script", "reason": why})
     return out
 
 
@@ -509,6 +598,27 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
         why = c.get("generic") or generic_reason(tuple(tokens(c["name"])[0]), frozenset(), None)
         if why:
             c["signals"] = [*c["signals"], {"label": GENERIC_LABEL, "good": False,
+                                            "text": f"{why}: cần người duyệt"}]
+            if c["status"] == "auto_added":
+                c["status"] = "pending"
+        # Gambling, betting, adult: never a brand of the lake. A word list
+        # catches what the AI calls a chain anyway ("OKVIP"); the AI's own
+        # sensitive flag holds the rest for an admin.
+        why = sensitive_reason(*_names(c))
+        if why:
+            c["status"] = "auto_rejected"
+            c["signals"] = [*c["signals"], {"label": SENSITIVE_LABEL, "good": False, "text": why}]
+        elif c["ai"] and c["ai"].get("sensitive"):
+            c["signals"] = [*c["signals"], {"label": SENSITIVE_LABEL, "good": False,
+                                            "text": "AI đánh giá là cờ bạc, người lớn hoặc hàng cấm: cần người duyệt"}]
+            if c["status"] == "auto_added":
+                c["status"] = "pending"
+        # The name as found too: the AI may give "中国建设银行" a Latin canonical
+        # name, but the stored row keeps the first one (_store does not update
+        # names) and apply() adds the stored name.
+        why = script_reason(c["original"]) or script_reason(c["name"])
+        if why:
+            c["signals"] = [*c["signals"], {"label": SCRIPT_LABEL, "good": False,
                                             "text": f"{why}: cần người duyệt"}]
             if c["status"] == "auto_added":
                 c["status"] = "pending"
