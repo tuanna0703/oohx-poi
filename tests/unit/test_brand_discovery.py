@@ -12,6 +12,8 @@ from poi_lake.services.brand_discovery import (
     keys_of,
     prune_keys,
     rule_score,
+    script_reason,
+    sensitive_reason,
     strip_prefix,
     tokens,
     total_score,
@@ -135,3 +137,44 @@ def test_a_chain_named_like_a_person_waits_too() -> None:
 def test_stores_of_unrelated_kinds_wait_for_review() -> None:
     assert _why("Commonwealth Bank", 0.57)
     assert _why("Commonwealth Bank", 0.9) is None
+
+
+def test_gambling_and_adult_names_are_caught_with_their_accents() -> None:
+    for name in ("OKVIP", "Okvip88 Club", "Nhà Cái Uy Tín", "Nha Cai Uy Tin", "Tài Xỉu Online",
+                 "Cá độ bóng đá", "Lô Đề 24h", "Nổ Hũ Club", "Casino Hồ Tràm", "W88", "Bet Shop",
+                 "Sex Shop"):
+        assert sensitive_reason(name), name
+
+
+def test_names_that_only_fold_like_gambling_pass() -> None:
+    for name in ("Phở Bết", "Cà Đỗ", "Ca Do", "Lò Đề", "Nhà Cải Tạo", "Bò Nổ Hủ", "Sexy Nails",
+                 "Betong Coffee", "Highlands Coffee", "Ngân hàng Đông Á"):
+        assert sensitive_reason(name) is None, name
+
+
+def test_names_not_in_latin_letters() -> None:
+    assert script_reason("ដេប៉ូតេលា") == "tên viết bằng chữ Khmer"
+    assert script_reason("中国建设银行") == "tên viết bằng chữ Hán"
+    assert script_reason("ร้านกาแฟ") == "tên viết bằng chữ Thái"
+    for name in ("ACLEDA", "Đông Á", "Café 咖啡", "7-Eleven", ""):
+        assert script_reason(name) is None, name
+
+
+def test_blocked_by_names_sensitive_and_script() -> None:
+    settings = {**DEFAULTS, "auto_add": True, "add_at": 70, "min_stores": 1, "min_provinces": 1}
+    good = {"status": "pending", "score": 90, "stores": 40, "provinces": 9,
+            "ai": {"is_chain": True}, "signals": []}
+    assert blocked_by({**good, "name": "OKVIP"}, settings) == [
+        {"code": "sensitive", "reason": 'tên trang cá cược "okvip"'}]
+    flagged = {**good, "name": "Lucky", "ai": {"is_chain": True, "sensitive": True}}
+    assert [b["code"] for b in blocked_by(flagged, settings)] == ["sensitive"]
+    assert blocked_by({**good, "name": "ដេប៉ូតេលា"}, settings) == [
+        {"code": "script", "reason": "tên viết bằng chữ Khmer"}]
+    assert blocked_by({**good, "name": "Highlands Coffee"}, settings) == []
+
+
+def test_ai_verdict_carries_sensitive() -> None:
+    v = brand_ai._verdict("claude", "m", {"is_chain": True, "sensitive": True, "confidence": 1}, "X")
+    assert v.sensitive is True and v.as_json()["sensitive"] is True
+    assert brand_ai._verdict("claude", "m", {"is_chain": True}, "X").sensitive is False
+    assert "sensitive" in brand_ai.VERDICT_SCHEMA["required"]

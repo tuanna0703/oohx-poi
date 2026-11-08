@@ -46,6 +46,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "is_chain": {"type": "boolean"},
+        "sensitive": {"type": "boolean"},
         "confidence": {"type": "number"},
         "canonical_name": {"type": "string"},
         "category": {"type": "string", "enum": list(CATEGORIES)},
@@ -54,7 +55,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
         "search_term": {"type": "string"},
         "note": {"type": "string"},
     },
-    "required": ["is_chain", "confidence", "canonical_name", "category", "parent_company",
+    "required": ["is_chain", "sensitive", "confidence", "canonical_name", "category", "parent_company",
                  "aliases", "search_term", "note"],
     "additionalProperties": False,
 }
@@ -64,7 +65,9 @@ SYSTEM = (
     "Given a candidate name and sample place names that matched it, decide whether the "
     "candidate is one real chain or brand operating in Vietnam (several outlets under one "
     "brand), as opposed to a common word, a place name, a generic shop type or unrelated "
-    "shops that share a word. Reply with the JSON object only. canonical_name: the brand as "
+    "shops that share a word. sensitive: true when the brand is gambling or betting (casinos, "
+    "bookmakers, online betting or card-game sites), adult content, or illegal goods, "
+    "whether or not it is a chain. Reply with the JSON object only. canonical_name: the brand as "
     "it writes itself. aliases: other spellings seen in the samples or commonly used, at "
     "most 5. search_term: what to type into Google Maps to find its outlets, at most 40 "
     "characters. note: one short sentence in Vietnamese for an admin, saying what the "
@@ -84,6 +87,7 @@ class Verdict:
     aliases: list[str]
     search_term: str
     note: str
+    sensitive: bool = False
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -91,6 +95,7 @@ class Verdict:
             "confidence": self.confidence, "canonical_name": self.canonical_name,
             "category": self.category, "parent_company": self.parent_company,
             "aliases": self.aliases, "search_term": self.search_term, "note": self.note,
+            "sensitive": self.sensitive,
         }
 
 
@@ -130,6 +135,7 @@ def _verdict(provider: str, model: str, data: dict[str, Any], fallback_name: str
         aliases=[str(a)[:100] for a in (data.get("aliases") or []) if str(a).strip()][:5],
         search_term=str(data.get("search_term") or fallback_name)[:40],
         note=str(data.get("note") or "")[:400],
+        sensitive=bool(data.get("sensitive")),
     )
 
 

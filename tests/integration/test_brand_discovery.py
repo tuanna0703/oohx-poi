@@ -235,3 +235,62 @@ async def test_ai_per_run_sets_how_many_verdicts_a_run_asks(monkeypatch: pytest.
         await _forget(brand, key)
         async with sm() as s:
             await _cleanup(s, tag)
+
+
+async def test_gambling_is_never_added_and_an_ai_flag_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With auto-add on and every threshold met, a betting site the AI calls a
+    chain is rejected, and a chain the AI marks sensitive waits for review."""
+    from poi_lake.services import app_settings, brand_ai, brand_discovery
+
+    tag = "bdx-" + uuid.uuid4().hex[:6]
+    bet = "Okvip" + uuid.uuid4().hex[:4]
+    flagged = "Luckrix" + uuid.uuid4().hex[:4]
+    sm = get_sessionmaker()
+    async with sm() as s:
+        for name in (bet, flagged):
+            for i in range(10):
+                mid = await _seed_master(s, name=f"{name} {i}", lat=10.8 + i / 100, lng=106.7,
+                                         test_tag=tag, category="entertainment")
+                await s.execute(
+                    text("UPDATE master_pois SET province_code = :p WHERE id = :i"),
+                    {"p": ("79", "01", "48")[i % 3], "i": mid},
+                )
+        await s.commit()
+
+    real = app_settings.discovery
+
+    async def discovery(session):  # type: ignore[no-untyped-def]
+        return {**await real(session), "auto_add": True, "add_at": 1, "reject_below": 0,
+                "min_stores": 1, "min_provinces": 1, "ai_per_run": 5000}
+
+    async def verify_many(session, cands, settings=None, *, on_round=None, **_):  # type: ignore[no-untyped-def]
+        got = {}
+        for c in cands:
+            name = {bet.lower(): bet, flagged.lower(): flagged}.get(c["key"])
+            if name:
+                got[c["key"]] = brand_ai.Verdict(
+                    provider="claude", model="fake", is_chain=True, confidence=1.0,
+                    canonical_name=name, category="entertainment", parent_company=None,
+                    aliases=[], search_term=name, note="", sensitive=name == flagged)
+        return got, None
+
+    monkeypatch.setattr(brand_discovery.app_settings, "discovery", discovery)
+    monkeypatch.setattr(brand_discovery.brand_ai, "verify_many", verify_many)
+    try:
+        async with sm() as s:
+            await brand_discovery.run(s)
+        async with sm() as s:
+            rows = dict((await s.execute(
+                text("SELECT key, status FROM brand_candidates WHERE key = ANY(:k)"),
+                {"k": [bet.lower(), flagged.lower()]},
+            )).all())
+            added = (await s.execute(
+                text("SELECT count(*) FROM brands WHERE name = ANY(:n)"), {"n": [bet, flagged]}
+            )).scalar_one()
+        assert rows == {bet.lower(): "auto_rejected", flagged.lower(): "pending"}
+        assert added == 0
+    finally:
+        for name in (bet, flagged):
+            await _forget(name, name.lower())
+        async with sm() as s:
+            await _cleanup(s, tag)
