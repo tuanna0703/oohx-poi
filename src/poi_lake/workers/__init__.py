@@ -208,9 +208,14 @@ def _start_catalog_scheduler() -> None:
                 iw = int(now // items_s)
                 if r.set(f"poi-lake:scheduler:catalog-items:{iw}", "1", ex=items_s + 10, nx=True):
                     queue_winmart_items.send()
-                    if settings.catalog_concung_enabled:
-                        refresh_concung.send()
                     logger.info("scheduled catalog items crawl enqueued (window=%d)", iw)
+            # Con Cưng once a Vietnam day, under its own key: its first run
+            # follows the deploy that turns it on, not the next items window.
+            if settings.catalog_concung_enabled:
+                cday = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
+                if r.set(f"poi-lake:scheduler:concung:{cday}", "1", ex=2 * 86400, nx=True):
+                    refresh_concung.send()
+                    logger.info("scheduled concung refresh enqueued (%s)", cday)
             hw = int(now // 3600)
             if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):
                 snapshot_prices.send()

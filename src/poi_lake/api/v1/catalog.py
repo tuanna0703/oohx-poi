@@ -9,6 +9,8 @@
   GET  /api/v1/catalog/{chain}/stores          masters whose store lists products,
                                                or one product (?sku=) (read:master)
   GET  /api/v1/catalog/{chain}/products/{sku}/prices   its daily prices, today's (read:master)
+  GET  /api/v1/catalog/{chain}/price-moves[?day=&direction=]   products whose price moved
+                                               that day against the day before (read:master)
   GET  /api/v1/catalog/{chain}/brands[?company=]       brands with products (read:master)
   GET  /api/v1/catalog/{chain}/brands/{slug}           one brand: products, rivals (read:master)
   GET  /api/v1/catalog/{chain}/companies/{slug}        one company's brands by group (read:master)
@@ -21,7 +23,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import select
@@ -148,6 +151,22 @@ async def product_prices(
     if out is None:
         raise HTTPException(404, "unknown product")
     return out
+
+
+@router.get("/catalog/{chain}/price-moves", dependencies=[Depends(require_permission("read:master"))])
+async def price_moves(
+    chain: str = Path(pattern=CHAIN_CODE),
+    day: date | None = Query(default=None, description="defaults to the latest summarised day"),
+    direction: Literal["all", "up", "down"] = Query(default="all"),
+    page: int = Query(default=1, ge=1, le=1000),
+    per_page: int = Query(default=50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Products whose price changed on ``day`` against the day before, biggest
+    move first, with how many went up, down, into or out of a promotion."""
+    return await catalog.price_moves(
+        session, chain, day=day, direction=direction, page=page, per_page=per_page
+    )
 
 
 @admin_router.get("/{chain}")
