@@ -256,3 +256,107 @@ async def test_chain_websites_adapter_builds_a_raw_record() -> None:
             await s.execute(text("DELETE FROM chain_stores WHERE chain = 'bachhoaxanh' AND store_code = :c"),
                             {"c": code})
             await s.commit()
+
+
+async def test_concung_online_prices_at_a_virtual_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Con Cưng pass: products at the virtual online store, listed by the
+    products API; a cut page retires nothing; the store is never 'missing'."""
+    import json as _json
+
+    import httpx
+
+    from poi_lake.catalog import concung
+    from poi_lake.workers import catalog as catalog_worker
+
+    def product(pid: str, price: str, real: str) -> dict:
+        return {"id_product": pid, "product_name": f"Sữa test {pid}", "reference": f"55{pid}",
+                "manufacture_name": "Meiji", "price": price, "real_price": real,
+                "category_name_erp": "Sữa;Sữa bột", "url_link": f"https://concung.com/sua/s-{pid}.html"}
+
+    def page(products: list[dict], whole: bool = True) -> str:
+        body = "".join(f"<script>var productpid_1_{p['id_product']}={_json.dumps(p)};</script>" for p in products)
+        return f"<html>{body}</html>" if whole else f"<html>{body}"
+
+    pages = {
+        "/sua-bot-1014.html": page([product("1", "200000", "180000"), product("2", "90000", "90000")]),
+        "/bim-ta-1015.html": page([product("3", "300000", "300000")]),
+    }
+    sitemap = "<urlset>" + "".join(f"<url><loc>https://concung.com{p}</loc></url>" for p in pages) + "</urlset>"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=sitemap)
+        return httpx.Response(200, text=pages[req.url.path])
+
+    real_client = concung.ConCungClient
+
+    def fake_client(**kw):  # type: ignore[no-untyped-def]
+        http = httpx.AsyncClient(base_url=concung.BASE_URL, transport=httpx.MockTransport(handler))
+        return real_client(client=http, min_interval_s=0)
+
+    monkeypatch.setattr(concung, "ConCungClient", fake_client)
+    sm = get_sessionmaker()
+    tag = "cc-" + uuid.uuid4().hex[:6]
+    async with sm() as s:
+        key, _ = await _make_client(s, tag)
+    try:
+        first = await catalog_worker._refresh_concung()
+        assert (first["categories"], first["whole"], first["items"]) == (2, 2, 3)
+
+        # Next pass: product 2 left its (whole) page; the other page is cut and
+        # has lost product 3 from what arrived, which must not retire it.
+        pages["/sua-bot-1014.html"] = page([product("1", "200000", "150000")])
+        pages["/bim-ta-1015.html"] = page([], whole=False)
+        second = await catalog_worker._refresh_concung()
+        assert (second["whole"], second["cut"], second["removed"]) == (1, 1, 1)
+
+        async with sm() as s:
+            store = (await s.execute(text(
+                "SELECT store_type, master_id, ST_X(location::geometry) AS x FROM chain_stores "
+                "WHERE chain = 'concung' AND store_code = 'online'"
+            ))).one()
+            assert (store.store_type, store.master_id, store.x) == ("ONLINE", None, 0.0)
+            listed = dict((await s.execute(text(
+                "SELECT sku, sale_price FROM chain_store_products WHERE chain = 'concung'"
+            ))).all())
+            assert listed == {"1": 150000, "3": None}
+            changes = (await s.execute(text(
+                "SELECT count(*) FROM chain_price_changes WHERE chain = 'concung' AND sku = '1'"
+            ))).scalar_one()
+            assert changes == 2, "the sale price changed once"
+            assert await catalog.missing_stores(s, "concung", ["Con Cưng"]) == []
+
+        # A third pass saved one category at a time: product 1 moves to the
+        # later category. It must not be retired by the first save and come back.
+        monkeypatch.setattr(catalog_worker, "CONCUNG_SAVE_EVERY", 1)
+        pages["/sua-bot-1014.html"] = page([product("5", "50000", "50000")])
+        pages["/bim-ta-1015.html"] = page([product("3", "300000", "300000"), product("1", "200000", "150000")])
+        third = await catalog_worker._refresh_concung()
+        assert third["removed"] == 0
+        async with sm() as s:
+            gone_1 = (await s.execute(text(
+                "SELECT count(*) FROM chain_price_changes "
+                "WHERE chain = 'concung' AND sku = '1' AND price IS NULL"
+            ))).scalar_one()
+            assert gone_1 == 0, "no false disappearance"
+            menu_1 = (await s.execute(text(
+                "SELECT menu FROM chain_store_products WHERE chain = 'concung' AND sku = '1'"
+            ))).scalar_one()
+            assert menu_1 == "bim-ta-1015"
+
+        async with await _http() as c:
+            r = await c.get("/api/v1/catalog/concung/products", headers={"X-API-Key": key})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["stores"] == 1 and body["total"] == 3
+            assert {i["sku"]: i["min_price"] for i in body["items"]} == {"1": 150000, "3": 300000, "5": 50000}
+            assert all(i["barcode"] is None and i["image_url"] is None for i in body["items"])
+            r = await c.get("/api/v1/catalog/concung/stores", params={"sku": "1"}, headers={"X-API-Key": key})
+            assert r.json()["master_ids"] == [], "the virtual store is no place"
+    finally:
+        async with sm() as s:
+            for t in ("chain_price_daily", "chain_price_changes", "chain_store_products",
+                      "chain_products", "chain_stores"):
+                await s.execute(text(f"DELETE FROM {t} WHERE chain = 'concung'"))
+            await s.commit()
+            await _cleanup(s, tag)

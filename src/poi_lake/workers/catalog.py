@@ -5,7 +5,9 @@ queues ``crawl_winmart_store`` for every store in ``CATALOG_WINMART_REGIONS``;
 ``queue_winmart_items`` re-reads those stores' listings alone (daily, for
 prices), and ``snapshot_prices`` folds today's prices into ``chain_price_daily``.
 ``refresh_bachhoaxanh`` reads Bách Hoá Xanh's store list and matches it; that
-chain has no product crawl.
+chain has no product crawl. ``refresh_concung`` reads Con Cưng's online prices
+(its category pages) into one virtual store; off unless
+``CATALOG_CONCUNG_ENABLED``.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
 about one request a second against winmart.vn.
 """
@@ -20,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import dramatiq
 
-from poi_lake.catalog import bachhoaxanh
+from poi_lake.catalog import bachhoaxanh, concung
 from poi_lake.catalog.base import CatalogTransientError
 from poi_lake.catalog.chains import CHAINS
 from poi_lake.catalog.winmart import CHAIN, WinMartClient
@@ -151,6 +153,74 @@ async def _refresh_bachhoaxanh() -> dict:
         )
         matched = await catalog.match_stores(s, bachhoaxanh.CHAIN, BHX_BRANDS)
     return {**stats, **saved, **matched, "complete": complete}
+
+
+CONCUNG_SAVE_EVERY = 25  # categories read between two saves
+CONCUNG_MAX_FAILURES = 20  # categories in a row that fail: the site is down, stop
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=6 * 3600_000)
+def refresh_concung() -> None:
+    result = _run(_refresh_concung)
+    logger.info("concung refresh: %r", result)
+
+
+async def _refresh_concung() -> dict:
+    """Every category page's products at the virtual online store.
+
+    Saved every ``CONCUNG_SAVE_EVERY`` categories under one timestamp, so a
+    run cut short keeps what it read. Retiring waits for the end of the run:
+    a product that left one category may turn up in a later one. Only
+    categories whose page arrived whole retire what they no longer list, and a
+    run that stops early retires nothing."""
+    now = datetime.now(UTC)
+    label = CHAINS[concung.CHAIN].label
+    async with session_scope() as s:
+        store = await catalog.ensure_online_store(s, concung.CHAIN, label)
+    stats = {"categories": 0, "whole": 0, "cut": 0, "failed": 0, "items": 0, "removed": 0}
+    interval = get_settings().catalog_concung_interval_s
+    async with concung.ConCungClient(min_interval_s=interval) as cc:
+        urls = await cc.categories()
+        stats["categories"] = len(urls)
+        batch: dict[str, concung.Item] = {}
+        whole: list[str] = []
+        failures = 0
+
+        async def save(retire: list[str]) -> None:
+            async with session_scope() as s:
+                saved = await catalog.save_items(
+                    s, concung.CHAIN, store, list(batch.values()), answered_menus=retire, now=now
+                )
+            stats["items"] += saved["items"]
+            stats["removed"] += saved["removed"]
+            batch.clear()
+
+        for i, url in enumerate(urls, 1):
+            try:
+                items, is_whole = await cc.category(url)
+            except concung.CatalogError as exc:  # transient errors included
+                stats["failed"] += 1
+                failures += 1
+                logger.info("concung %s: %s", url, exc)
+                if failures >= CONCUNG_MAX_FAILURES:
+                    stats["stopped"] = f"{failures} categories failed in a row"
+                    break
+                continue
+            failures = 0
+            stats["whole" if is_whole else "cut"] += 1
+            for it in items:
+                batch.setdefault(it.sku, it)
+            # A whole page may retire what its category no longer lists; an
+            # empty one may be a changed layout, so it retires nothing.
+            m = concung.CATEGORY_URL.match(url)
+            if is_whole and items and m:
+                whole.append(m.group(1))
+            if i % CONCUNG_SAVE_EVERY == 0:
+                await save([])
+        # Retire only now, and only when the run read its categories to the end.
+        await save([] if "stopped" in stats else whole)
+        stats["requests"] = cc.requests
+    return stats
 
 
 @dramatiq.actor(queue_name="catalog", max_retries=3, min_backoff=60_000, time_limit=30 * 60_000)
