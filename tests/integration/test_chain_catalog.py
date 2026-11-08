@@ -326,13 +326,33 @@ async def test_concung_online_prices_at_a_virtual_store(monkeypatch: pytest.Monk
             assert changes == 2, "the sale price changed once"
             assert await catalog.missing_stores(s, "concung", ["Con Cưng"]) == []
 
+        # A third pass saved one category at a time: product 1 moves to the
+        # later category. It must not be retired by the first save and come back.
+        monkeypatch.setattr(catalog_worker, "CONCUNG_SAVE_EVERY", 1)
+        pages["/sua-bot-1014.html"] = page([product("5", "50000", "50000")])
+        pages["/bim-ta-1015.html"] = page([product("3", "300000", "300000"), product("1", "200000", "150000")])
+        third = await catalog_worker._refresh_concung()
+        assert third["removed"] == 0
+        async with sm() as s:
+            gone_1 = (await s.execute(text(
+                "SELECT count(*) FROM chain_price_changes "
+                "WHERE chain = 'concung' AND sku = '1' AND price IS NULL"
+            ))).scalar_one()
+            assert gone_1 == 0, "no false disappearance"
+            menu_1 = (await s.execute(text(
+                "SELECT menu FROM chain_store_products WHERE chain = 'concung' AND sku = '1'"
+            ))).scalar_one()
+            assert menu_1 == "bim-ta-1015"
+
         async with await _http() as c:
             r = await c.get("/api/v1/catalog/concung/products", headers={"X-API-Key": key})
             assert r.status_code == 200, r.text
             body = r.json()
-            assert body["stores"] == 1 and body["total"] == 2
-            assert {i["sku"]: i["min_price"] for i in body["items"]} == {"1": 150000, "3": 300000}
+            assert body["stores"] == 1 and body["total"] == 3
+            assert {i["sku"]: i["min_price"] for i in body["items"]} == {"1": 150000, "3": 300000, "5": 50000}
             assert all(i["barcode"] is None and i["image_url"] is None for i in body["items"])
+            r = await c.get("/api/v1/catalog/concung/stores", params={"sku": "1"}, headers={"X-API-Key": key})
+            assert r.json()["master_ids"] == [], "the virtual store is no place"
     finally:
         async with sm() as s:
             for t in ("chain_price_daily", "chain_price_changes", "chain_store_products",

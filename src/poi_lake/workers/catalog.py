@@ -169,8 +169,10 @@ async def _refresh_concung() -> dict:
     """Every category page's products at the virtual online store.
 
     Saved every ``CONCUNG_SAVE_EVERY`` categories under one timestamp, so a
-    run cut short keeps what it read. Only categories whose page arrived whole
-    may retire products they no longer list."""
+    run cut short keeps what it read. Retiring waits for the end of the run:
+    a product that left one category may turn up in a later one. Only
+    categories whose page arrived whole retire what they no longer list, and a
+    run that stops early retires nothing."""
     now = datetime.now(UTC)
     label = CHAINS[concung.CHAIN].label
     async with session_scope() as s:
@@ -184,17 +186,14 @@ async def _refresh_concung() -> dict:
         whole: list[str] = []
         failures = 0
 
-        async def save() -> None:
-            if not batch:
-                return
+        async def save(retire: list[str]) -> None:
             async with session_scope() as s:
                 saved = await catalog.save_items(
-                    s, concung.CHAIN, store, list(batch.values()), answered_menus=whole, now=now
+                    s, concung.CHAIN, store, list(batch.values()), answered_menus=retire, now=now
                 )
             stats["items"] += saved["items"]
             stats["removed"] += saved["removed"]
             batch.clear()
-            whole.clear()
 
         for i, url in enumerate(urls, 1):
             try:
@@ -217,8 +216,9 @@ async def _refresh_concung() -> dict:
             if is_whole and items and m:
                 whole.append(m.group(1))
             if i % CONCUNG_SAVE_EVERY == 0:
-                await save()
-        await save()
+                await save([])
+        # Retire only now, and only when the run read its categories to the end.
+        await save([] if "stopped" in stats else whole)
         stats["requests"] = cc.requests
     return stats
 

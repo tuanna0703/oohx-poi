@@ -694,7 +694,11 @@ async def chain_listed_masters(session: AsyncSession, chain: str, sku: str | Non
             "AND master_id IS NOT NULL AND items_crawled_at IS NOT NULL"
         )
     else:
-        sql = f"SELECT DISTINCT s.master_id FROM chain_store_products sp {_LISTED} WHERE sp.chain = :chain AND sp.sku = :sku"
+        # _LISTED admits an online-only chain's virtual store, which is no place.
+        sql = (
+            f"SELECT DISTINCT s.master_id FROM chain_store_products sp {_LISTED} "
+            "WHERE sp.chain = :chain AND sp.sku = :sku AND s.master_id IS NOT NULL"
+        )
     rows = (await session.execute(text(sql), {"chain": chain, "sku": sku})).scalars()
     return sorted(str(m) for m in rows)
 
