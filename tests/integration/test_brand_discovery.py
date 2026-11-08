@@ -160,3 +160,78 @@ async def test_settings_never_return_a_key() -> None:
 async def _make_client_plain(tag: str) -> tuple[str, int]:
     async with get_sessionmaker()() as s:
         return await _make_client(s, tag, permissions=["read:master"])
+
+
+async def test_ai_per_run_sets_how_many_verdicts_a_run_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ai_per_run 0: the chain waits for the AI ("new"). Raised: it is asked,
+    in one batch, and its verdict is stored with it."""
+    from poi_lake.services import app_settings, brand_ai, brand_discovery
+
+    tag = "bdp-" + uuid.uuid4().hex[:6]
+    brand = "Pacrix" + uuid.uuid4().hex[:4]
+    key = brand.lower()
+    sm = get_sessionmaker()
+    async with sm() as s:
+        for i in range(10):
+            mid = await _seed_master(s, name=f"{brand} {i}", lat=10.8 + i / 100, lng=106.7,
+                                     test_tag=tag, category="retail")
+            await s.execute(
+                text("UPDATE master_pois SET province_code = :p, openooh_subcategory = 'retail.mother_baby' "
+                     "WHERE id = :i"),
+                {"p": ("79", "01", "48")[i % 3], "i": mid},
+            )
+        await s.commit()
+
+    real = app_settings.discovery
+    per_run: dict[str, int] = {"n": 0, "cut": 0}
+    asked: list[list[str]] = []
+
+    async def discovery(session):  # type: ignore[no-untyped-def]
+        return {**await real(session), "auto_add": False, "ai_per_run": per_run["n"]}
+
+    async def verify_many(session, cands, settings=None, *, on_round=None, **_):  # type: ignore[no-untyped-def]
+        asked.append([c["key"] for c in cands])
+        verdict = brand_ai.Verdict(provider="claude", model="fake", is_chain=True, confidence=0.9,
+                                   canonical_name=brand, category="retail", parent_company=None,
+                                   aliases=[], search_term=brand, note="")
+        got = {c["key"]: verdict for c in cands if c["key"] == key}
+        if on_round:
+            await on_round(got)
+        await session.commit()
+        if per_run.get("cut"):
+            raise TimeoutError("time limit")  # the actor stopped after this round
+        return got, None
+
+    monkeypatch.setattr(brand_discovery.app_settings, "discovery", discovery)
+    monkeypatch.setattr(brand_discovery.brand_ai, "verify_many", verify_many)
+
+    async def row() -> tuple[str, object]:
+        async with sm() as s:
+            r = (await s.execute(text("SELECT status, ai FROM brand_candidates WHERE key = :k"), {"k": key})).one()
+        return r.status, r.ai
+
+    try:
+        async with sm() as s:
+            await brand_discovery.run(s)
+        assert asked == []
+        assert await row() == ("new", None)
+
+        per_run.update(n=5000, cut=1)
+        async with sm() as s:
+            with pytest.raises(TimeoutError):
+                await brand_discovery.run(s)
+        status, ai = await row()
+        assert status == "new" and isinstance(ai, dict), "a run cut short keeps the verdicts it paid for"
+
+        per_run["cut"] = 0
+        async with sm() as s:
+            await brand_discovery.run(s)
+        assert key in asked[0]
+        assert all(key not in a for a in asked[1:]), "the kept verdict is not asked (or paid for) again"
+        status, ai = await row()
+        assert status == "pending"
+        assert isinstance(ai, dict) and ai["model"] == "fake"
+    finally:
+        await _forget(brand, key)
+        async with sm() as s:
+            await _cleanup(s, tag)

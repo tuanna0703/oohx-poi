@@ -39,6 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "min_provinces": 3,
     "brand_share": 0.30,
     "rescan_days": 90,
+    "ai_per_run": 300,  # AI verdicts per discovery run; raise it to clear a backlog
 }
 
 

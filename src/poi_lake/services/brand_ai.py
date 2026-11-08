@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -218,29 +219,99 @@ def order(settings: dict[str, Any]) -> list[str]:
     return sorted(usable, key=lambda p: rank[settings["providers"][p]["role"]])
 
 
-async def verify(session: AsyncSession, candidate: dict[str, Any],
-                 settings: dict[str, Any] | None = None) -> Verdict:
-    """The first provider's verdict that comes back; raises AiUnavailableError."""
-    settings = settings or await app_settings.discovery(session)
-    if await spent_this_month(session) >= float(settings["budget_usd"]):
-        raise AiUnavailableError("budget spent")
+AI_CONCURRENCY = 8  # verdicts asked at once by verify_many
+
+
+@dataclass
+class _Asked:
+    """One candidate's round of providers: the verdict, or why none came back,
+    and the calls to log (provider, model, tokens in, tokens out, ok)."""
+
+    verdict: Verdict | None
+    errors: list[str]
+    calls: list[tuple[str, str, int, int, bool]]
+
+
+def _ask(settings: dict[str, Any], candidate: dict[str, Any]) -> _Asked:
+    """Ask the providers in order, in this thread; touches no session."""
     prompt = prompt_for(candidate)
-    errors = []
+    errors: list[str] = []
+    calls: list[tuple[str, str, int, int, bool]] = []
     for provider in order(settings):
         key = app_settings.api_key(settings, provider)
         model = settings["providers"][provider]["model"]
         if not key:
             continue
         try:
-            data, t_in, t_out = await asyncio.to_thread(CALLERS[provider], key, model, prompt)
+            data, t_in, t_out = CALLERS[provider](key, model, prompt)
         except Exception as exc:  # any provider failure moves on to the next one
             logger.warning("brand AI %s failed: %s", provider, type(exc).__name__)
-            await _log(session, provider, model, "brand_verify", 0, 0, False)
+            calls.append((provider, model, 0, 0, False))
             errors.append(f"{provider}: {type(exc).__name__}")
             continue
-        await _log(session, provider, model, "brand_verify", t_in, t_out, True)
-        return _verdict(provider, model, data, candidate["name"])
-    raise AiUnavailableError("; ".join(errors) or "no provider configured")
+        calls.append((provider, model, t_in, t_out, True))
+        return _Asked(_verdict(provider, model, data, candidate["name"]), errors, calls)
+    return _Asked(None, errors, calls)
+
+
+async def _logged(session: AsyncSession, asked: _Asked) -> None:
+    for provider, model, t_in, t_out, ok in asked.calls:
+        await _log(session, provider, model, "brand_verify", t_in, t_out, ok)
+
+
+async def verify(session: AsyncSession, candidate: dict[str, Any],
+                 settings: dict[str, Any] | None = None) -> Verdict:
+    """The first provider's verdict that comes back; raises AiUnavailableError."""
+    settings = settings or await app_settings.discovery(session)
+    if await spent_this_month(session) >= float(settings["budget_usd"]):
+        raise AiUnavailableError("budget spent")
+    asked = await asyncio.to_thread(_ask, settings, candidate)
+    await _logged(session, asked)
+    if asked.verdict is None:
+        raise AiUnavailableError("; ".join(asked.errors) or "no provider configured")
+    return asked.verdict
+
+
+async def verify_many(
+    session: AsyncSession,
+    candidates: list[dict[str, Any]],
+    settings: dict[str, Any] | None = None,
+    *,
+    concurrency: int = AI_CONCURRENCY,
+    on_round: Callable[[dict[str, Verdict]], Awaitable[None]] | None = None,
+) -> tuple[dict[str, Verdict], str | None]:
+    """Verdicts for many candidates, ``concurrency`` at a time, by ``key``.
+
+    Goes in rounds of ``concurrency``: the budget is checked before each round
+    (so it can be overshot by at most one round) and every call is logged and
+    committed after it, with what ``on_round`` writes for that round's
+    verdicts (so a run cut short keeps what it paid for). Stops at the first candidate no provider could answer,
+    or when the budget is spent, and says why as the second value; the
+    verdicts already back are kept.
+    """
+    settings = settings or await app_settings.discovery(session)
+    out: dict[str, Verdict] = {}
+    step = max(1, concurrency)
+    for i in range(0, len(candidates), step):
+        if await spent_this_month(session) >= float(settings["budget_usd"]):
+            return out, "budget spent"
+        chunk = candidates[i: i + step]
+        rounds = await asyncio.gather(*(asyncio.to_thread(_ask, settings, c) for c in chunk))
+        failed: str | None = None
+        got: dict[str, Verdict] = {}
+        for c, asked in zip(chunk, rounds, strict=True):
+            await _logged(session, asked)
+            if asked.verdict is not None:
+                got[c["key"]] = asked.verdict
+            elif failed is None:
+                failed = f"{c['name']}: " + ("; ".join(asked.errors) or "no provider configured")
+        if on_round and got:
+            await on_round(got)
+        out.update(got)
+        await session.commit()
+        if failed:
+            return out, failed
+    return out, None
 
 
 async def check(session: AsyncSession, provider: str) -> dict[str, Any]:
