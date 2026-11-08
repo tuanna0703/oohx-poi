@@ -354,9 +354,11 @@ def script_reason(name: str) -> str | None:
 
 
 def _names(cand: dict[str, Any]) -> list[str]:
+    """The names a sensitive check reads. Not the aliases: they hold the
+    accent-free spellings of the stores ("BET" for "Bệt"), which the accents
+    rule cannot tell apart."""
     ai = cand.get("ai") or {}
-    return [cand.get("name") or "", cand.get("original") or "", ai.get("canonical_name") or "",
-            *(cand.get("aliases") or [])]
+    return [cand.get("name") or "", cand.get("original") or "", ai.get("canonical_name") or ""]
 
 
 def blocked_by(cand: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -668,8 +670,12 @@ ORG_WORDS = frozenset((
 ))
 # Vietnamese ones are two words, dropped only together: "hang" alone is Hằng.
 ORG_PHRASES = (("ngan", "hang"), ("cong", "ty"), ("tap", "doan"))
-FUZZY_MIN = 93      # rapidfuzz ratio on compact keys of 8+ letters: "Highland Coffee" ~ "Highlands Coffee"
-FUZZY_MIN_LEN = 8
+# Near spellings compare the distinctive part of a name only (its generic words
+# dropped: "coffee", "tea", "may"…), 6+ letters, same first letter, at this
+# rapidfuzz ratio: "Highland Coffee" ~ "Highlands Coffee", but not "AT Coffee"
+# ~ "T Coffee" or "My Coffee Tea" ~ "Mây Coffee & Tea".
+FUZZY_MIN = 90
+FUZZY_MIN_LEN = 6
 
 
 def _org_words(words: list[str]) -> list[bool]:
@@ -684,10 +690,19 @@ def _org_words(words: list[str]) -> list[bool]:
 def compact_key(name: str) -> str:
     """The name folded, its company words dropped, glued: "ACLEDA Bank Plc" → "acleda"."""
     words = tokens(name)[0]
-    key = "".join(w for w, org in zip(words, _org_words(words), strict=True) if not org)
-    if key.endswith("bank") and len(key) > 6:  # "vietcombank", glued
-        key = key[:-4]
-    return key
+    return _unbank("".join(w for w, org in zip(words, _org_words(words), strict=True) if not org))
+
+
+def _unbank(key: str) -> str:
+    """ "vietcombank" → "vietcom": "bank" glued to the name."""
+    return key[:-4] if key.endswith("bank") and len(key) > 6 else key
+
+
+def core_key(name: str) -> str:
+    """The distinctive part of a compact key: generic words dropped too."""
+    words = tokens(name)[0]
+    return _unbank("".join(w for w, org in zip(words, _org_words(words), strict=True)
+                           if not org and w not in GENERIC))
 
 
 def acronym(name: str) -> str | None:
@@ -710,16 +725,25 @@ class BrandMatcher:
     def __init__(self, *, strict: bool = False) -> None:
         self.strict = strict
         self.by_key: dict[str, str] = {}
-        self.by_acronym: dict[str, str] = {}
+        self.by_name: dict[str, str] = {}      # compact keys of names only, not aliases
+        self.by_acronym: dict[str, str] = {}   # from names only
+        self.by_core: dict[str, str] = {}
 
     def add(self, name: str, *spellings: str) -> None:
-        for s in (name, *spellings):
+        for i, s in enumerate((name, *spellings)):
             k = compact_key(s)
             if len(k) >= 2:
                 self.by_key.setdefault(k, name)
-            a = acronym(s)
-            if a and len(a) >= 3:
-                self.by_acronym.setdefault(a, name)
+                if i == 0:
+                    self.by_name.setdefault(k, name)
+            core = core_key(s)
+            if len(core) >= FUZZY_MIN_LEN:
+                self.by_core.setdefault(core, name)
+        # Acronyms from the name only: "VCB", an alias of Vietcombank, is not
+        # the initials of every "V… C… Bank" ("Viet Capital Bank").
+        a = acronym(name)
+        if a and len(a) >= 3:
+            self.by_acronym.setdefault(a, name)
 
     def find(self, *names: str) -> str | None:
         for name in names:
@@ -733,12 +757,14 @@ class BrandMatcher:
             if k in self.by_acronym:            # "SCB" against "Saigon Commercial Bank"
                 return self.by_acronym[k]
             a = acronym(name)
-            if a and a in self.by_key:          # "Saigon Commercial Bank" against "SCB"
-                return self.by_key[a]
-            if len(k) >= FUZZY_MIN_LEN:
-                hit = process.extractOne(k, self.by_key.keys(), scorer=fuzz.ratio, score_cutoff=FUZZY_MIN)
+            if a and a in self.by_name:         # "Saigon Commercial Bank" against "SCB"
+                return self.by_name[a]
+            core = core_key(name)
+            if len(core) >= FUZZY_MIN_LEN:
+                hit = process.extractOne(core, [c for c in self.by_core if c[0] == core[0]],
+                                         scorer=fuzz.ratio, score_cutoff=FUZZY_MIN)
                 if hit:
-                    return self.by_key[hit[0]]
+                    return self.by_core[hit[0]]
         return None
 
 
