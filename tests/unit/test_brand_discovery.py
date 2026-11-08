@@ -218,3 +218,32 @@ def test_strict_matching_between_candidates_takes_compact_keys_only() -> None:
     assert m.find("Saigon Commercial Bank") is None
     m.add("Highlands Coffee")
     assert m.find("Highland Coffee") is None
+
+
+def test_wrong_matches_seen_on_production_are_gone() -> None:
+    """2026-11-08: "Viet Capital Bank" was matched to Vietcombank (its initials
+    are VCB, an alias of Vietcombank), "AT Coffee" to T Coffee, "P Coffee" to
+    Pi Coffee, "My Coffee Tea" to Mây Coffee & Tea."""
+    m = BrandMatcher()
+    for name, aliases in (("Vietcombank", ["VCB"]), ("T Coffee", []), ("Pi Coffee", []),
+                          ("Mây Coffee & Tea", []), ("VietinBank", []), ("LPBank", ["Lienviet"]),
+                          ("Viettel Store", []), ("Biluxury", []), ("HT Mart", [])):
+        m.add(name, *aliases)
+    for wrong in ("Viet Capital Bank", "AT Coffee", "P Coffee", "My Coffee Tea"):
+        assert m.find(wrong) is None, wrong
+    # and the right ones still match
+    assert m.find("Viettin Bank") == "VietinBank"
+    assert m.find("Lienviet") == "LPBank"
+    assert m.find("ViettelStore") == "Viettel Store"
+    assert m.find("Bi Luxury") == "Biluxury"
+    assert m.find("HTMart") == "HT Mart"
+
+
+def test_an_accent_free_alias_does_not_make_a_name_sensitive() -> None:
+    """ "Bệt" (to sit on the floor) was rejected: its stores typed without accents
+    gave it the alias "BET"."""
+    settings = {**DEFAULTS, "auto_add": True, "add_at": 70, "min_stores": 1, "min_provinces": 1}
+    cand = {"status": "pending", "score": 80, "stores": 20, "provinces": 5, "name": "Bệt",
+            "aliases": ["bệt", "BET", "Bet"], "ai": {"is_chain": True, "canonical_name": "Bệt"},
+            "signals": []}
+    assert blocked_by(cand, settings) == []
