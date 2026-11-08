@@ -2,6 +2,7 @@
 
   GET  /brand-discovery/summary                    counts for the page head
   GET  /brand-discovery/candidates?status=…        pending | added | rejected
+                                                   (each with ``blocked_by``)
   POST /brand-discovery/candidates/{id}/approve    add it (fields as edited)
   POST /brand-discovery/candidates/{id}/reject
   POST /brand-discovery/candidates/{id}/restore    back to pending
@@ -124,7 +125,12 @@ async def candidates(
             {"s": list(STATUSES[status_]), "n": limit},
         )
     ).all()
-    return {"items": [_row(r) for r in rows]}
+    # Why each waiting one was not added on its own, against today's settings.
+    settings = await app_settings.discovery(session)
+    items = [_row(r) for r in rows]
+    for item in items:
+        item["blocked_by"] = brand_discovery.blocked_by(item, settings)
+    return {"items": items}
 
 
 class Approve(BaseModel):

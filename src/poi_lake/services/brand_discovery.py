@@ -274,6 +274,41 @@ def decide(cand: dict[str, Any], settings: dict[str, Any]) -> str:
     return "pending"
 
 
+GENERIC_LABEL = "Tên chung chung"
+
+
+def blocked_by(cand: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Why a waiting candidate was not added on its own, against today's settings.
+
+    ``None`` for a candidate already settled (added, rejected, removed). Each
+    reason is ``{"code": …}`` plus what the candidate has and what it needs:
+    the five tests of ``decide`` and the two holds of ``run`` (a generic name,
+    a chain the dictionary already has). An empty list means nothing blocks
+    it: the next pass will add it.
+    """
+    if cand.get("status") not in ("new", "pending"):
+        return None
+    out: list[dict[str, Any]] = []
+    if not settings["auto_add"]:
+        out.append({"code": "auto_add_off"})
+    for code, need in (("score", "add_at"), ("stores", "min_stores"), ("provinces", "min_provinces")):
+        if cand[code] < settings[need]:
+            out.append({"code": code, "have": int(cand[code]), "need": int(settings[need])})
+    ai = cand.get("ai")
+    if not ai:
+        out.append({"code": "ai_missing"})
+    elif not ai.get("is_chain"):
+        out.append({"code": "ai_not_chain"})
+    elif ai.get("existing_brand"):
+        out.append({"code": "existing_brand", "brand": ai["existing_brand"]})
+    for s in cand.get("signals") or []:
+        if s.get("label") == GENERIC_LABEL:
+            reason = str(s.get("text") or "").removesuffix(": cần người duyệt")
+            out.append({"code": "generic", "reason": reason})
+            break
+    return out
+
+
 def signals_of(stores: int, provinces: int, purity: float, top_cat: str | None,
                position: float, common: bool, settings: dict[str, Any]) -> list[dict[str, Any]]:
     pct = lambda x: f"{round(100 * x)}%"  # noqa: E731
@@ -461,7 +496,7 @@ async def run(session: AsyncSession, *, use_ai: bool = True) -> dict[str, Any]:
         c["status"] = decide(c, settings)
         why = c.get("generic") or generic_reason(tuple(tokens(c["name"])[0]), frozenset(), None)
         if why:
-            c["signals"] = [*c["signals"], {"label": "Tên chung chung", "good": False,
+            c["signals"] = [*c["signals"], {"label": GENERIC_LABEL, "good": False,
                                             "text": f"{why}: cần người duyệt"}]
             if c["status"] == "auto_added":
                 c["status"] = "pending"
