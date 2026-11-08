@@ -314,3 +314,61 @@ async def test_gambling_is_never_added_and_an_ai_flag_waits(monkeypatch: pytest.
             await s.commit()
         async with sm() as s:
             await _cleanup(s, tag)
+
+
+async def test_a_long_name_of_a_known_brand_waits_to_be_merged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "X Bank Plc" found in the data is the dictionary's "X": even with auto-add
+    on and every threshold met it is not added, and it names the brand to merge into."""
+    from poi_lake.services import app_settings, brand_ai, brand_discovery
+
+    tag = "bdk-" + uuid.uuid4().hex[:6]
+    known = "Corvex" + uuid.uuid4().hex[:4]
+    long_name = f"{known} Bank Plc"
+    sm = get_sessionmaker()
+    async with sm() as s:
+        await s.execute(
+            text("INSERT INTO brands (name, aliases, category, country, enabled) VALUES (:n, '{}', 'financial', 'VN', true)"),
+            {"n": known},
+        )
+        for i in range(10):
+            mid = await _seed_master(s, name=f"{long_name} {i}", lat=10.8, lng=106.7 + i / 100,
+                                     test_tag=tag, category="financial")
+            await s.execute(text("UPDATE master_pois SET province_code = :p WHERE id = :i"),
+                            {"p": ("79", "01", "48")[i % 3], "i": mid})
+        await s.commit()
+
+    real = app_settings.discovery
+
+    async def discovery(session):  # type: ignore[no-untyped-def]
+        return {**await real(session), "auto_add": True, "add_at": 1, "reject_below": 0,
+                "min_stores": 1, "min_provinces": 1, "ai_per_run": 5000}
+
+    async def verify_many(session, cands, settings=None, *, on_round=None, **_):  # type: ignore[no-untyped-def]
+        verdict = brand_ai.Verdict(provider="claude", model="fake", is_chain=True, confidence=1.0,
+                                   canonical_name=long_name, category="financial", parent_company=None,
+                                   aliases=[], search_term=long_name, note="")
+        return {c["key"]: verdict for c in cands if c["key"].startswith(known.lower())}, None
+
+    monkeypatch.setattr(brand_discovery.app_settings, "discovery", discovery)
+    monkeypatch.setattr(brand_discovery.brand_ai, "verify_many", verify_many)
+    try:
+        async with sm() as s:
+            await brand_discovery.run(s)
+        async with sm() as s:
+            rows = (await s.execute(
+                text("SELECT status, ai FROM brand_candidates WHERE key LIKE :k"), {"k": known.lower() + "%"}
+            )).all()
+            added = (await s.execute(
+                text("SELECT count(*) FROM brands WHERE name = :n"), {"n": long_name}
+            )).scalar_one()
+        assert rows, "the long name was a candidate"
+        assert all(r.status != "auto_added" for r in rows)
+        assert any((r.ai or {}).get("existing_brand") == known for r in rows)
+        assert added == 0
+    finally:
+        async with sm() as s:
+            await s.execute(text("DELETE FROM brand_candidates WHERE key LIKE :k"), {"k": known.lower() + "%"})
+            await s.execute(text("DELETE FROM brands WHERE name = ANY(:n)"), {"n": [known, long_name]})
+            await s.commit()
+        async with sm() as s:
+            await _cleanup(s, tag)
