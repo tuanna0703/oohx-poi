@@ -64,6 +64,9 @@ _PRODUCT_VAR = re.compile(r"var productpid_\d+_\d+\s*=\s*(\{.*?\});\s*</script>"
 # Gifts that come with a purchase ("Quà tặng không bán"): not for sale, so
 # their price is no reference. Their category is never read.
 SKIP_CATEGORY = re.compile(r"^qua-tang-")
+# The menus rows of those categories were saved under before: the slug
+# ("qua-tang-khong-ban-101865") or the page's heading ("Quà tặng không bán").
+GIFT_MENUS = r"^(qua-tang-|quà tặng)"
 # What the site writes where a product has no brand of its own.
 NOT_A_BRAND = frozenset({"thương hiệu khác", "quà tặng không bán"})
 

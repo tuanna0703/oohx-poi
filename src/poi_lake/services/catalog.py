@@ -934,6 +934,19 @@ async def merge_store_state(
     await session.commit()
 
 
+async def menus_matching(session: AsyncSession, chain: str, store: str, pattern: str) -> list[str]:
+    """The menus the store's listings carry that match a POSIX regex, case
+    folded (Con Cưng's gift category, under its slug or its shown name)."""
+    rows = await session.execute(
+        text(
+            "SELECT DISTINCT menu FROM chain_store_products "
+            "WHERE chain = :c AND store_code = :s AND menu ~* :p"
+        ),
+        {"c": chain, "s": store, "p": pattern},
+    )
+    return sorted(m for m in rows.scalars() if m)
+
+
 async def retire_unseen(
     session: AsyncSession, chain: str, store: str, *, before: datetime, now: datetime
 ) -> int:

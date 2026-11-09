@@ -202,8 +202,9 @@ async def _refresh_concung() -> dict:
     async with concung.ConCungClient(min_interval_s=interval) as cc:
         listed = await cc.categories()
         urls = concung.to_read(listed, read_at)
-        # Rows a gift category left (their menu is its slug): retired below.
-        gifts = [s for u in listed if (s := concung.category_slug(u)) and concung.SKIP_CATEGORY.match(s)]
+        # Rows gift categories left, under their slug or their shown name: retired below.
+        async with session_scope() as s:
+            gifts = await catalog.menus_matching(s, concung.CHAIN, store, concung.GIFT_MENUS)
         stats["categories"] = len(urls)
         batch: dict[str, concung.Item] = {}
         whole: list[str] = []

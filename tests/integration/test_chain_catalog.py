@@ -464,10 +464,12 @@ async def test_concung_rotation_gifts_and_stale_listings(monkeypatch: pytest.Mon
         # Left by earlier runs: a gift (menu = its slug) seen yesterday, and a
         # product nobody has listed for 20 days.
         gift = concung.parse_product(product("9"), "qua-tang-khong-ban-101865")
+        # #41 saved gifts under the page's heading instead of the slug.
+        gift_named = concung.parse_product(product("10"), "Quà tặng không bán")
         old = concung.parse_product(product("old"), "sua-cu-1999")
-        assert gift and old
+        assert gift and gift_named and old
         await catalog.save_items(s, "concung", store, [old], answered_menus=[], now=long_ago)
-        await catalog.save_items(s, "concung", store, [gift], answered_menus=[],
+        await catalog.save_items(s, "concung", store, [gift, gift_named], answered_menus=[],
                                  now=datetime.now(UTC) - timedelta(days=1))
     try:
         stats = await catalog_worker._refresh_concung()
@@ -476,7 +478,7 @@ async def test_concung_rotation_gifts_and_stale_listings(monkeypatch: pytest.Mon
         async with sm() as s:
             skus = set((await s.execute(text(
                 "SELECT sku FROM chain_store_products WHERE chain = 'concung'"))).scalars())
-            assert skus == {"1", "2", "3"}, "the gift and the stale listing are gone"
+            assert skus == {"1", "2", "3"}, "the gifts (by slug and by name) and the stale listing are gone"
             state = await catalog.store_state(s, "concung", "online", catalog_worker.CONCUNG_READ_AT)
             assert set(state) == {"sua-bot-1014", "bim-ta-1015"}
 
