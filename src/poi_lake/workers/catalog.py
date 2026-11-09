@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -157,6 +158,14 @@ async def _refresh_bachhoaxanh() -> dict:
 
 CONCUNG_SAVE_EVERY = 25  # categories read between two saves
 CONCUNG_MAX_FAILURES = 20  # categories in a row that fail: the site is down, stop
+# Reading every page of every category takes longer than a day's run may: stop
+# taking new categories after this, an hour inside the actor's 6 h limit, so
+# the run still saves and retires. The next run starts with what this one left.
+CONCUNG_BUDGET_S = 5 * 3600
+# A listing not seen for this long is gone: every category has been read
+# since (a full rotation takes a few days), including ones renamed or dropped.
+CONCUNG_STALE_DAYS = 14
+CONCUNG_READ_AT = "category_read_at"  # in the online store's raw: slug -> last read
 
 
 @dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=6 * 3600_000)
@@ -166,24 +175,34 @@ def refresh_concung() -> None:
 
 
 async def _refresh_concung() -> dict:
-    """Every category page's products at the virtual online store.
+    """Con Cưng's categories at the virtual online store, least recently read
+    first, for up to ``CONCUNG_BUDGET_S``.
 
     Saved every ``CONCUNG_SAVE_EVERY`` categories under one timestamp, so a
-    run cut short keeps what it read. Retiring waits for the end of the run:
-    a product that left one category may turn up in a later one. Only
-    categories whose page arrived whole retire what they no longer list, and a
-    run that stops early retires nothing."""
+    run cut short keeps what it read; each saved category's read time is kept
+    for the next run's order. Retiring waits for the end of the run (a
+    product that left one category may turn up in a later one): the
+    categories read whole retire what they no longer list, gift categories
+    everything they listed, and listings unseen for ``CONCUNG_STALE_DAYS``
+    go. A run stopped by failures retires nothing."""
     now = datetime.now(UTC)
+    started = time.monotonic()
     label = CHAINS[concung.CHAIN].label
     async with session_scope() as s:
         store = await catalog.ensure_online_store(s, concung.CHAIN, label)
-    stats = {"categories": 0, "whole": 0, "cut": 0, "failed": 0, "items": 0, "removed": 0}
+        read_at = await catalog.store_state(s, concung.CHAIN, store, CONCUNG_READ_AT)
+    stats = {"categories": 0, "read": 0, "whole": 0, "cut": 0, "failed": 0, "items": 0,
+             "removed": 0}
     interval = get_settings().catalog_concung_interval_s
     async with concung.ConCungClient(min_interval_s=interval) as cc:
-        urls = await cc.categories()
+        listed = await cc.categories()
+        urls = concung.to_read(listed, read_at)
+        # Rows a gift category left (their menu is its slug): retired below.
+        gifts = [s for u in listed if (s := concung.category_slug(u)) and concung.SKIP_CATEGORY.match(s)]
         stats["categories"] = len(urls)
         batch: dict[str, concung.Item] = {}
         whole: list[str] = []
+        read_now: dict[str, str] = {}
         failures = 0
 
         async def save(retire: list[str]) -> None:
@@ -191,11 +210,17 @@ async def _refresh_concung() -> dict:
                 saved = await catalog.save_items(
                     s, concung.CHAIN, store, list(batch.values()), answered_menus=retire, now=now
                 )
+                if read_now:
+                    await catalog.merge_store_state(s, concung.CHAIN, store, CONCUNG_READ_AT, read_now)
             stats["items"] += saved["items"]
             stats["removed"] += saved["removed"]
             batch.clear()
+            read_now.clear()
 
         for i, url in enumerate(urls, 1):
+            if time.monotonic() - started > CONCUNG_BUDGET_S:
+                stats["out_of_time"] = True  # the rest come first next run
+                break
             try:
                 items, is_whole = await cc.category(url)
             except concung.CatalogError as exc:  # transient errors included
@@ -207,7 +232,9 @@ async def _refresh_concung() -> dict:
                     break
                 continue
             failures = 0
+            stats["read"] += 1
             stats["whole" if is_whole else "cut"] += 1
+            read_now[concung.category_slug(url) or url] = datetime.now(UTC).isoformat()
             for it in items:
                 batch.setdefault(it.sku, it)
             # A whole page may retire what its category no longer lists; an
@@ -217,8 +244,13 @@ async def _refresh_concung() -> dict:
                 whole.append(items[0].menu)
             if i % CONCUNG_SAVE_EVERY == 0:
                 await save([])
-        # Retire only now, and only when the run read its categories to the end.
-        await save([] if "stopped" in stats else whole)
+        stopped = "stopped" in stats
+        await save([] if stopped else [*whole, *gifts])
+        if not stopped:
+            async with session_scope() as s:
+                stats["stale_removed"] = await catalog.retire_unseen(
+                    s, concung.CHAIN, store, before=now - timedelta(days=CONCUNG_STALE_DAYS), now=now
+                )
         stats["requests"] = cc.requests
     return stats
 

@@ -416,3 +416,78 @@ async def test_price_moves_list_what_changed_against_the_day_before() -> None:
             await s.execute(text("DELETE FROM chain_products WHERE chain = :c"), {"c": chain})
             await s.commit()
             await _cleanup(s, tag)
+
+
+async def test_concung_rotation_gifts_and_stale_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gift categories are never read and what they listed goes; listings
+    unseen for CONCUNG_STALE_DAYS go; each category's read time is kept; a run
+    out of time reads nothing more and still saves."""
+    import json as _json
+
+    import httpx
+
+    from poi_lake.catalog import concung
+    from poi_lake.workers import catalog as catalog_worker
+
+    def product(pid: str) -> dict:
+        return {"id_product": pid, "product_name": f"Sản phẩm {pid}", "reference": pid,
+                "manufacture_name": "Meiji", "price": "100000", "real_price": "100000",
+                "category_name_erp": "Sữa"}
+
+    def page(*pids: str) -> str:
+        return "<html>" + "".join(
+            f"<script>var productpid_1_{p}={_json.dumps(product(p))};</script>" for p in pids
+        ) + "</html>"
+
+    pages = {"/sua-bot-1014.html": page("1", "2"), "/bim-ta-1015.html": page("3"),
+             "/qua-tang-khong-ban-101865.html": page("9")}
+    sitemap = "<urlset>" + "".join(f"<url><loc>https://concung.com{p}</loc></url>" for p in pages) + "</urlset>"
+    fetched: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        fetched.append(req.url.path)
+        if req.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=sitemap)
+        return httpx.Response(200, text=pages[req.url.path])
+
+    real_client = concung.ConCungClient
+
+    def fake_client(**kw):  # type: ignore[no-untyped-def]
+        http = httpx.AsyncClient(base_url=concung.BASE_URL, transport=httpx.MockTransport(handler))
+        return real_client(client=http, min_interval_s=0)
+
+    monkeypatch.setattr(concung, "ConCungClient", fake_client)
+    sm = get_sessionmaker()
+    long_ago = datetime.now(UTC) - timedelta(days=20)
+    async with sm() as s:
+        store = await catalog.ensure_online_store(s, "concung", "Con Cưng")
+        # Left by earlier runs: a gift (menu = its slug) seen yesterday, and a
+        # product nobody has listed for 20 days.
+        gift = concung.parse_product(product("9"), "qua-tang-khong-ban-101865")
+        old = concung.parse_product(product("old"), "sua-cu-1999")
+        assert gift and old
+        await catalog.save_items(s, "concung", store, [old], answered_menus=[], now=long_ago)
+        await catalog.save_items(s, "concung", store, [gift], answered_menus=[],
+                                 now=datetime.now(UTC) - timedelta(days=1))
+    try:
+        stats = await catalog_worker._refresh_concung()
+        assert (stats["categories"], stats["read"], stats["stale_removed"]) == (2, 2, 1)
+        assert "/qua-tang-khong-ban-101865.html" not in fetched, "gift category never read"
+        async with sm() as s:
+            skus = set((await s.execute(text(
+                "SELECT sku FROM chain_store_products WHERE chain = 'concung'"))).scalars())
+            assert skus == {"1", "2", "3"}, "the gift and the stale listing are gone"
+            state = await catalog.store_state(s, "concung", "online", catalog_worker.CONCUNG_READ_AT)
+            assert set(state) == {"sua-bot-1014", "bim-ta-1015"}
+
+        monkeypatch.setattr(catalog_worker, "CONCUNG_BUDGET_S", -1)
+        fetched.clear()
+        again = await catalog_worker._refresh_concung()
+        assert again["out_of_time"] and again["read"] == 0 and again["removed"] == 0
+        assert fetched == ["/sitemap.xml"]
+    finally:
+        async with sm() as s:
+            for t in ("chain_price_daily", "chain_price_changes", "chain_store_products",
+                      "chain_products", "chain_stores"):
+                await s.execute(text(f"DELETE FROM {t} WHERE chain = 'concung'"))
+            await s.commit()

@@ -172,3 +172,32 @@ async def test_paging_stops_when_a_page_repeats_or_is_cut() -> None:
     async with ConCungClient(client=http, min_interval_s=0) as cc:
         _, whole = await cc.category("https://concung.com/sua-bot-1014.html")
     assert not whole, "a cut page 2 keeps the category from retiring anything"
+
+
+def test_categories_to_read_skip_gifts_and_go_least_recently_read_first() -> None:
+    from poi_lake.catalog.concung import to_read
+
+    urls = [
+        "https://concung.com/sua-bot-1014.html",
+        "https://concung.com/qua-tang-khong-ban-101865.html",
+        "https://concung.com/bim-ta-1015.html",
+        "https://concung.com/do-choi-1016.html",
+    ]
+    read_at = {"sua-bot-1014": "2026-11-09T01:00:00+00:00", "bim-ta-1015": "2026-11-08T01:00:00+00:00"}
+    assert to_read(urls, read_at) == [
+        "https://concung.com/do-choi-1016.html",   # never read
+        "https://concung.com/bim-ta-1015.html",    # read longest ago
+        "https://concung.com/sua-bot-1014.html",
+    ], "the gift category is never read"
+    assert to_read(urls, {}) == [urls[0], urls[2], urls[3]], "sitemap order when nothing was read"
+
+
+def test_placeholder_brands_are_no_brand() -> None:
+    from poi_lake.catalog.brand_owners import owner_of
+
+    for raw in ("Thương Hiệu Khác", "Quà Tặng Không Bán"):
+        it = parse_product(_product("7", manufacture_name=raw), None)
+        assert it is not None and it.brand is None, raw
+        assert owner_of(raw) is None, "rows saved before stay off brand pages"
+    real = parse_product(_product("8"), None)
+    assert real is not None and real.brand == "Happy Bites"

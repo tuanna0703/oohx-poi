@@ -19,7 +19,9 @@ from unidecode import unidecode
 
 _CSV = Path(__file__).with_name("brand_owners.csv")
 # Brand strings that mean "no brand": their products are left out of brand pages.
-NO_BRAND = {"", "NOBRAND", "NO BRAND", "KHÔNG NHÃN HIỆU"}
+NO_BRAND = {"", "NOBRAND", "NO BRAND", "KHÔNG NHÃN HIỆU",
+            # Con Cưng's: rows saved before its client dropped them
+            "THƯƠNG HIỆU KHÁC", "QUÀ TẶNG KHÔNG BÁN"}
 
 
 def slugify(s: str) -> str:

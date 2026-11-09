@@ -61,6 +61,11 @@ PAGE_SIZE = 60  # products a category page holds; a shorter page is the last
 MAX_PAGES = 40
 _H1 = re.compile(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", re.S)
 _PRODUCT_VAR = re.compile(r"var productpid_\d+_\d+\s*=\s*(\{.*?\});\s*</script>", re.S)
+# Gifts that come with a purchase ("Quà tặng không bán"): not for sale, so
+# their price is no reference. Their category is never read.
+SKIP_CATEGORY = re.compile(r"^qua-tang-")
+# What the site writes where a product has no brand of its own.
+NOT_A_BRAND = frozenset({"thương hiệu khác", "quà tặng không bán"})
 
 
 def category_urls(sitemap: str) -> list[str]:
@@ -70,6 +75,19 @@ def category_urls(sitemap: str) -> list[str]:
         if CATEGORY_URL.match(loc):
             seen.setdefault(loc, None)
     return list(seen)
+
+
+def category_slug(url: str) -> str | None:
+    m = CATEGORY_URL.match(url)
+    return m.group(1) if m else None
+
+
+def to_read(urls: list[str], read_at: dict[str, str]) -> list[str]:
+    """The categories to read, gift categories left out, least recently read
+    first (never read first of all), the sitemap's order among equals: a run
+    cut short by its time budget leaves the rest for the next one."""
+    keep = [u for u in urls if (s := category_slug(u)) and not SKIP_CATEGORY.match(s)]
+    return sorted(keep, key=lambda u: read_at.get(category_slug(u) or "", ""))
 
 
 def _money(v: Any) -> float | None:
@@ -98,6 +116,8 @@ def parse_product(d: dict[str, Any], menu: str | None) -> Item | None:
     url = str(d.get("url_link") or "")
     seo = url.removeprefix(BASE_URL + "/").removesuffix(".html") or None
     brand = " ".join(str(d.get("manufacture_name") or "").split()) or None
+    if brand and brand.lower() in NOT_A_BRAND:
+        brand = None
     return Item(
         sku=sku,
         item_no=str(d.get("reference") or "").strip(),
