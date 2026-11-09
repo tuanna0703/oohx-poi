@@ -958,3 +958,74 @@ async def price_moves(
             for r in rows
         ],
     }
+
+
+async def store_state(session: AsyncSession, chain: str, store: str, key: str) -> dict[str, Any]:
+    """A crawler's bookkeeping kept in its store's ``raw`` under ``key``
+    (Con Cưng: when each category was last read)."""
+    v = (
+        await session.execute(
+            text("SELECT raw -> CAST(:k AS text) FROM chain_stores WHERE chain = :c AND store_code = :s"),
+            {"c": chain, "s": store, "k": key},
+        )
+    ).scalar_one_or_none()
+    return v if isinstance(v, dict) else {}
+
+
+async def merge_store_state(
+    session: AsyncSession, chain: str, store: str, key: str, patch: dict[str, Any]
+) -> None:
+    """Merge ``patch`` into the store's ``raw[key]`` and commit."""
+    await session.execute(
+        text(
+            """
+            UPDATE chain_stores
+            SET raw = jsonb_set(COALESCE(raw, '{}'::jsonb), ARRAY[CAST(:k AS text)],
+                                COALESCE(raw -> CAST(:k AS text), '{}'::jsonb) || CAST(:p AS jsonb))
+            WHERE chain = :c AND store_code = :s
+            """
+        ),
+        {"c": chain, "s": store, "k": key, "p": json.dumps(patch)},
+    )
+    await session.commit()
+
+
+async def menus_matching(session: AsyncSession, chain: str, store: str, pattern: str) -> list[str]:
+    """The menus the store's listings carry that match a POSIX regex, case
+    folded (Con Cưng's gift category, under its slug or its shown name)."""
+    rows = await session.execute(
+        text(
+            "SELECT DISTINCT menu FROM chain_store_products "
+            "WHERE chain = :c AND store_code = :s AND menu ~* :p"
+        ),
+        {"c": chain, "s": store, "p": pattern},
+    )
+    return sorted(m for m in rows.scalars() if m)
+
+
+async def retire_unseen(
+    session: AsyncSession, chain: str, store: str, *, before: datetime, now: datetime
+) -> int:
+    """Drop the store's listings not seen since ``before``, noting each in the
+    price history as gone (no price) at ``now``, and commit."""
+    gone = (
+        await session.execute(
+            text(
+                """
+                WITH gone AS (
+                    DELETE FROM chain_store_products
+                    WHERE chain = CAST(:chain AS varchar) AND store_code = CAST(:store AS varchar)
+                      AND seen_at < CAST(:before AS timestamptz)
+                    RETURNING sku
+                )
+                INSERT INTO chain_price_changes (chain, store_code, sku, price, sale_price, seen_at)
+                SELECT CAST(:chain AS varchar), CAST(:store AS varchar), sku, NULL, NULL,
+                       CAST(:now AS timestamptz)
+                FROM gone
+                """
+            ),
+            {"chain": chain, "store": store, "before": before, "now": now},
+        )
+    ).rowcount
+    await session.commit()
+    return int(gone or 0)
