@@ -212,9 +212,9 @@ async def _refresh_concung() -> dict:
                 batch.setdefault(it.sku, it)
             # A whole page may retire what its category no longer lists; an
             # empty one may be a changed layout, so it retires nothing.
-            m = concung.CATEGORY_URL.match(url)
-            if is_whole and items and m:
-                whole.append(m.group(1))
+            # (Its menu is the category's shown name, the slug when it has none.)
+            if is_whole and items and items[0].menu:
+                whole.append(items[0].menu)
             if i % CONCUNG_SAVE_EVERY == 0:
                 await save([])
         # Retire only now, and only when the run read its categories to the end.
