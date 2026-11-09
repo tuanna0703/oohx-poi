@@ -178,12 +178,19 @@ async def chain_summary(chain: str, session: AsyncSession = Depends(get_session)
 @admin_router.post("/{chain}/refresh", status_code=202)
 async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> dict[str, Any]:
     c = _chain(chain)
-    from poi_lake.workers.catalog import refresh_bachhoaxanh, refresh_concung, refresh_winmart
+    from poi_lake.workers.catalog import (
+        refresh_bachhoaxanh,
+        refresh_cellphones,
+        refresh_concung,
+        refresh_winmart,
+    )
 
     if c.code == "winmart":
         refresh_winmart.send(crawl_items)
     elif c.code == "concung":
         refresh_concung.send()  # on demand, whatever CATALOG_CONCUNG_ENABLED says
+    elif c.code == "cellphones":
+        refresh_cellphones.send()
     else:
         refresh_bachhoaxanh.send()
     return {"queued": True, "chain": c.code, "crawl_items": crawl_items and c.products}
