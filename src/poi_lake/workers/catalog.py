@@ -168,6 +168,11 @@ CONCUNG_STALE_DAYS = 14
 CONCUNG_READ_AT = "category_read_at"  # in the online store's raw: slug -> last read
 
 
+def _clock() -> float:
+    """The run's own clock for its time budget (a seam for tests)."""
+    return time.monotonic()
+
+
 @dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=6 * 3600_000)
 def refresh_concung() -> None:
     result = _run(_refresh_concung)
@@ -181,12 +186,12 @@ async def _refresh_concung() -> dict:
     Saved every ``CONCUNG_SAVE_EVERY`` categories under one timestamp, so a
     run cut short keeps what it read; each saved category's read time is kept
     for the next run's order. Retiring waits for the end of the run (a
-    product that left one category may turn up in a later one): the
-    categories read whole retire what they no longer list, gift categories
-    everything they listed, and listings unseen for ``CONCUNG_STALE_DAYS``
-    go. A run stopped by failures retires nothing."""
+    product that left one category may turn up in a later one): a run that
+    read every category lets those read whole retire what they no longer
+    list; gift categories retire everything they listed; listings unseen for
+    ``CONCUNG_STALE_DAYS`` go. A run stopped by failures retires nothing."""
     now = datetime.now(UTC)
-    started = time.monotonic()
+    started = _clock()
     label = CHAINS[concung.CHAIN].label
     async with session_scope() as s:
         store = await catalog.ensure_online_store(s, concung.CHAIN, label)
@@ -218,7 +223,7 @@ async def _refresh_concung() -> dict:
             read_now.clear()
 
         for i, url in enumerate(urls, 1):
-            if time.monotonic() - started > CONCUNG_BUDGET_S:
+            if _clock() - started > CONCUNG_BUDGET_S:
                 stats["out_of_time"] = True  # the rest come first next run
                 break
             try:
@@ -245,7 +250,16 @@ async def _refresh_concung() -> dict:
             if i % CONCUNG_SAVE_EVERY == 0:
                 await save([])
         stopped = "stopped" in stats
-        await save([] if stopped else [*whole, *gifts])
+        # Per category only after reading every category: a product that left
+        # one read today may sit in one left for the next run. A run out of
+        # time leaves that to the stale rule; failures retire nothing.
+        if stopped:
+            retire: list[str] = []
+        elif stats.get("out_of_time"):
+            retire = gifts
+        else:
+            retire = [*whole, *gifts]
+        await save(retire)
         if not stopped:
             async with session_scope() as s:
                 stats["stale_removed"] = await catalog.retire_unseen(

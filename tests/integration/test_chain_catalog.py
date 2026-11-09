@@ -485,6 +485,21 @@ async def test_concung_rotation_gifts_and_stale_listings(monkeypatch: pytest.Mon
         again = await catalog_worker._refresh_concung()
         assert again["out_of_time"] and again["read"] == 0 and again["removed"] == 0
         assert fetched == ["/sitemap.xml"]
+
+        # Out of time after one category: product 2 left it (for a category
+        # not read today, say). It must not be retired by that partial run.
+        clock = iter([0.0, 0.0, 10.0])  # start, before category 1, before category 2
+        monkeypatch.setattr(catalog_worker, "CONCUNG_BUDGET_S", 5)
+        monkeypatch.setattr(catalog_worker, "_clock", lambda: next(clock, 10.0))
+        pages["/bim-ta-1015.html"] = page("3")
+        pages["/sua-bot-1014.html"] = page("1")
+        partial = await catalog_worker._refresh_concung()
+        assert partial["out_of_time"] and partial["read"] == 1 and partial["removed"] == 0
+        async with sm() as s:
+            still = (await s.execute(text(
+                "SELECT count(*) FROM chain_store_products WHERE chain = 'concung' AND sku = '2'"
+            ))).scalar_one()
+            assert still == 1, "a partial run retires nothing per category"
     finally:
         async with sm() as s:
             for t in ("chain_price_daily", "chain_price_changes", "chain_store_products",
