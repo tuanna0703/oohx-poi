@@ -111,9 +111,18 @@ async def test_client_reads_sitemap_and_categories() -> None:
         urls = await cc.categories()
         items, whole = await cc.category(urls[0])
         assert [i.sku for i in items] == ["1", "2"] and whole
-        assert items[0].menu == "sua-bot-1014"
+        assert items[0].menu == "sua-bot-1014", "no <h1>: the slug"
         from poi_lake.catalog.base import CatalogTransientError
 
         with pytest.raises(CatalogTransientError):
             await cc.category(urls[1])
     assert seen == ["/sitemap.xml", "/sua-bot-1014.html", "/bim-ta-101259.html"]
+
+
+def test_a_category_is_named_as_its_page_heads_it() -> None:
+    from poi_lake.catalog.concung import category_name, parse_category
+
+    page = '<h1 itemprop="name">  Sữa bột &amp; pha sẵn </h1>' + _page(_product("7"))
+    assert category_name(page) == "Sữa bột & pha sẵn"
+    assert parse_category(page, category_name(page))[0].menu == "Sữa bột & pha sẵn"
+    assert category_name("<html><body>no heading</body></html>") is None

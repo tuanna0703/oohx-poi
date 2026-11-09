@@ -10,7 +10,9 @@ What we read, and only that:
   * ``/sitemap.xml`` — the category pages (``/<slug>-<id>.html``). The file is
     large and the site often cuts long transfers, so a truncated sitemap still
     yields the categories read before the cut.
-  * each category page — its first page of products, embedded in the page as
+  * each category page — its name as the page heads it (``<h1>``, "Sữa bột
+    pha sẵn"; the URL slug when there is none), kept as the products' menu,
+    and its first page of products, embedded in the page as
     ``var productpid_<page>_<id> = {...}``: id, ERP reference, name, brand,
     list price, selling price, ERP category. Products past the first page are
     loaded by an AJAX call with a CSRF token; we do not call it, so a pass
@@ -27,6 +29,7 @@ Be gentle: one request at a time, ``min_interval_s`` apart.
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import re
@@ -50,6 +53,7 @@ HEADERS = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xml"}  # s
 # has two segments (category/product-<id>.html).
 CATEGORY_URL = re.compile(r"^https://concung\.com/([a-z0-9-]+-\d+)\.html$")
 _LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
+_H1 = re.compile(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", re.S)
 _PRODUCT_VAR = re.compile(r"var productpid_\d+_\d+\s*=\s*(\{.*?\});\s*</script>", re.S)
 
 
@@ -121,6 +125,13 @@ def parse_category(html: str, menu: str | None) -> list[Item]:
     return list(out.values())
 
 
+def category_name(html: str) -> str | None:
+    """The category's name as the page heads it: "Sữa bột pha sẵn"."""
+    m = _H1.search(html)
+    name = " ".join(html_lib.unescape(m.group(1)).split()) if m else ""
+    return name or None
+
+
 def complete(html: str) -> bool:
     """Whether the page arrived whole: a cut page must not retire products."""
     return html.rstrip().endswith("</html>")
@@ -184,4 +195,4 @@ class ConCungClient:
         if m is None:
             raise CatalogError(f"not a category page: {url}")
         html = await self._get(f"/{m.group(1)}.html")
-        return parse_category(html, m.group(1)), complete(html)
+        return parse_category(html, category_name(html) or m.group(1)), complete(html)
