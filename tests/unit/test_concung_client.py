@@ -66,7 +66,8 @@ def test_parse_product_keeps_facts_only() -> None:
     assert it.category_path == ("Thực phẩm cho bé", "Snack ăn dặm", "Bánh gạo", "Happy Bites")
     assert it.seo_name == "banh-an-dam/banh-gao-72829"
     assert it.barcode is None, "the ERP reference is not an EAN"
-    assert it.image_url is None, "no images kept"
+    assert it.image_url == "https://cdn1.concung.com/x.webp", "the CDN URL, not the image"
+    assert parse_product(_product("1", image_cover="https://evil.example/x.png"), "m").image_url is None
     assert it.menu == "banh-an-dam-1026"
 
 
@@ -126,3 +127,48 @@ def test_a_category_is_named_as_its_page_heads_it() -> None:
     assert category_name(page) == "Sữa bột & pha sẵn"
     assert parse_category(page, category_name(page))[0].menu == "Sữa bột & pha sẵn"
     assert category_name("<html><body>no heading</body></html>") is None
+
+
+async def test_a_category_is_read_page_by_page_until_a_short_page() -> None:
+    from poi_lake.catalog import concung
+
+    full = [_product(str(i)) for i in range(concung.PAGE_SIZE)]
+    rest = [_product(str(100 + i)) for i in range(3)]
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        p = req.url.params.get("p")
+        seen.append(p or "")
+        return httpx.Response(200, text=_page(*(rest if p == "2" else full)))
+
+    http = httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    async with ConCungClient(client=http, min_interval_s=0) as cc:
+        items, whole = await cc.category("https://concung.com/sua-bot-1014.html")
+    assert whole and len(items) == concung.PAGE_SIZE + 3
+    assert seen == ["", "2"], "page 2 is short: the last"
+
+
+async def test_paging_stops_when_a_page_repeats_or_is_cut() -> None:
+    from poi_lake.catalog import concung
+
+    full = [_product(str(i)) for i in range(concung.PAGE_SIZE)]
+    calls = 0
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, text=_page(*full))  # the site ignores ?p=
+
+    http = httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    async with ConCungClient(client=http, min_interval_s=0) as cc:
+        items, whole = await cc.category("https://concung.com/sua-bot-1014.html")
+    assert (len(items), whole, calls) == (concung.PAGE_SIZE, True, 2)
+
+    def cut(req: httpx.Request) -> httpx.Response:
+        p = req.url.params.get("p")
+        return httpx.Response(200, text=_page(*full, whole=p != "2"))
+
+    http = httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(cut))
+    async with ConCungClient(client=http, min_interval_s=0) as cc:
+        _, whole = await cc.category("https://concung.com/sua-bot-1014.html")
+    assert not whole, "a cut page 2 keeps the category from retiring anything"

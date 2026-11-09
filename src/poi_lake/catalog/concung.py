@@ -12,16 +12,19 @@ What we read, and only that:
     yields the categories read before the cut.
   * each category page — its name as the page heads it (``<h1>``, "Sữa bột
     pha sẵn"; the URL slug when there is none), kept as the products' menu,
-    and its first page of products, embedded in the page as
+    and its products, ``PAGE_SIZE`` a page, embedded in the page as
     ``var productpid_<page>_<id> = {...}``: id, ERP reference, name, brand,
-    list price, selling price, ERP category. Products past the first page are
-    loaded by an AJAX call with a CSRF token; we do not call it, so a pass
-    covers each category's first ~47 products (best sellers first).
+    list price, selling price, ERP category, image. Later pages are the same
+    page with ``?p=2``, ``?p=3`` … (what the site's own pager links to), read
+    until a page is short, empty or brings nothing new.
 
 robots.txt allows these pages (it disallows ``/search/``, ``tab=``, ``back=``,
-customer pages). We keep facts only: ids, names, brands, categories, prices.
-No images, descriptions or reviews. The ERP reference (``5508000000003``) is
-Con Cưng's own code, not an EAN: ``barcode`` stays empty.
+customer pages). We keep facts: ids, names, brands, categories, prices, and
+the URL of the product's image on Con Cưng's CDN, which bizmap links to (the
+operator's decision, 2026-11-09, knowing article 15 of the site's terms); the
+image itself is never copied. No descriptions or reviews. The ERP reference
+(``5508000000003``) is Con Cưng's own code, not an EAN, and so is the
+product page's "gtin": ``barcode`` stays empty.
 
 Be gentle: one request at a time, ``min_interval_s`` apart.
 """
@@ -53,6 +56,9 @@ HEADERS = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xml"}  # s
 # has two segments (category/product-<id>.html).
 CATEGORY_URL = re.compile(r"^https://concung\.com/([a-z0-9-]+-\d+)\.html$")
 _LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
+_IMAGE = re.compile(r"^https://cdn\d*\.concung\.com/\S+$")
+PAGE_SIZE = 60  # products a category page holds; a shorter page is the last
+MAX_PAGES = 40
 _H1 = re.compile(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", re.S)
 _PRODUCT_VAR = re.compile(r"var productpid_\d+_\d+\s*=\s*(\{.*?\});\s*</script>", re.S)
 
@@ -104,8 +110,17 @@ def parse_product(d: dict[str, Any], menu: str | None) -> Item | None:
         category_path=path,
         menu=menu,
         seo_name=seo,
-        image_url=None,  # never kept for this chain
+        image_url=_image(d),
     )
+
+
+def _image(d: dict[str, Any]) -> str | None:
+    """The product's image on Con Cưng's CDN (a URL, never the image)."""
+    for key in ("image_cover", "image"):
+        url = str(d.get(key) or "").strip()
+        if _IMAGE.match(url):
+            return url
+    return None
 
 
 def parse_category(html: str, menu: str | None) -> list[Item]:
@@ -190,9 +205,24 @@ class ConCungClient:
         return urls
 
     async def category(self, url: str) -> tuple[list[Item], bool]:
-        """A category page's products and whether the page arrived whole."""
+        """A category's products over all its pages, and whether every page
+        read arrived whole. A cut page ends the category there."""
         m = CATEGORY_URL.match(url)
         if m is None:
             raise CatalogError(f"not a category page: {url}")
-        html = await self._get(f"/{m.group(1)}.html")
-        return parse_category(html, category_name(html) or m.group(1)), complete(html)
+        slug = m.group(1)
+        out: dict[str, Item] = {}
+        name: str | None = None
+        for page in range(1, MAX_PAGES + 1):
+            html = await self._get(f"/{slug}.html" if page == 1 else f"/{slug}.html?p={page}")
+            if name is None:
+                name = category_name(html) or slug
+            items = parse_category(html, name)
+            new = [it for it in items if it.sku not in out]
+            for it in new:
+                out[it.sku] = it
+            if not complete(html):
+                return list(out.values()), False
+            if len(items) < PAGE_SIZE or not new:
+                break
+        return list(out.values()), True
