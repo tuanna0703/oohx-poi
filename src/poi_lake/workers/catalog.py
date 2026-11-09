@@ -7,7 +7,10 @@ prices), and ``snapshot_prices`` folds today's prices into ``chain_price_daily``
 ``refresh_bachhoaxanh`` reads Bách Hoá Xanh's store list and matches it; that
 chain has no product crawl. ``refresh_concung`` reads Con Cưng's online prices
 (its category pages) into one virtual store; off unless
-``CATALOG_CONCUNG_ENABLED``.
+``CATALOG_CONCUNG_ENABLED``. ``refresh_cellphones`` reads part of
+CellphoneS's product pages each day into its virtual store, the pages read
+longest ago first. ``refresh_hoangha`` reads Hoàng Hà Mobile's category pages
+(and their brand pages) daily into its virtual store.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
 about one request a second against winmart.vn.
 """
@@ -22,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 import dramatiq
 
-from poi_lake.catalog import bachhoaxanh, concung
+from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha
 from poi_lake.catalog.base import CatalogTransientError
 from poi_lake.catalog.chains import CHAINS
 from poi_lake.catalog.winmart import CHAIN, WinMartClient
@@ -220,6 +223,174 @@ async def _refresh_concung() -> dict:
         # Retire only now, and only when the run read its categories to the end.
         await save([] if "stopped" in stats else whole)
         stats["requests"] = cc.requests
+    return stats
+
+
+CELLPHONES_SAVE_EVERY = 100  # pages read between two saves
+CELLPHONES_MAX_FAILURES = 30  # pages in a row that fail: the site is down, stop
+# Below this share of the products already known, the sitemaps are taken as
+# partial and retire nothing.
+CELLPHONES_SITEMAP_SHARE = 0.9
+
+
+def cellphones_order(slugs: list[str], read: dict[str, datetime]) -> list[str]:
+    """Pages never read first (in the sitemap's order), then those read
+    longest ago."""
+    epoch = datetime.min.replace(tzinfo=UTC)
+    return sorted(slugs, key=lambda s: read.get(s, epoch))
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=0, time_limit=4 * 3600_000)
+def refresh_cellphones() -> None:
+    result = _run(_refresh_cellphones)
+    logger.info("cellphones refresh: %r", result)
+
+
+async def _refresh_cellphones() -> dict:
+    """Up to ``CATALOG_CELLPHONES_PAGES`` product pages, for at most
+    ``CATALOG_CELLPHONES_MINUTES``, at the virtual online store.
+
+    A page with a price lists the product; a page with none (out of stock,
+    "contact us") or gone takes it off the listing; a product the sitemaps no
+    longer list leaves it too, when every sitemap file was read."""
+    settings = get_settings()
+    now = datetime.now(UTC)
+    deadline = now + timedelta(minutes=settings.catalog_cellphones_minutes)
+    label = CHAINS[cellphones.CHAIN].label
+    async with session_scope() as s:
+        store = await catalog.ensure_online_store(s, cellphones.CHAIN, label)
+        read = await catalog.read_times(s, cellphones.CHAIN)
+    stats = {"products": 0, "read": 0, "listed": 0, "unpriced": 0, "gone": 0, "skipped": 0,
+             "failed": 0, "removed": 0}
+    async with cellphones.CellphoneSClient(min_interval_s=settings.catalog_cellphones_interval_s) as cp:
+        slugs, whole = await cp.products()
+        stats["products"] = len(slugs)
+        listed: dict[str, cellphones.Item] = {}
+        unpriced: dict[str, cellphones.Item] = {}
+        gone: list[str] = []
+        failures = 0
+
+        async def save() -> None:
+            async with session_scope() as s:
+                if unpriced:
+                    await catalog.save_products(s, cellphones.CHAIN, list(unpriced.values()), now=now)
+                stats["removed"] += await catalog.retire_skus(
+                    s, cellphones.CHAIN, store, now=now, skus=[*gone, *unpriced]
+                )
+                await s.commit()
+                saved = await catalog.save_items(
+                    s, cellphones.CHAIN, store, list(listed.values()), answered_menus=[], now=now
+                )
+            stats["listed"] += saved["items"]
+            listed.clear()
+            unpriced.clear()
+            gone.clear()
+
+        for slug in cellphones_order(slugs, read)[: settings.catalog_cellphones_pages]:
+            if datetime.now(UTC) >= deadline:
+                stats["stopped"] = "time"
+                break
+            try:
+                it = await cp.product(slug)
+            except cellphones.GoneError:
+                gone.append(cellphones.sku_of(slug))
+                stats["gone"] += 1
+                continue
+            except cellphones.CatalogError as exc:  # transient errors included
+                stats["failed"] += 1
+                failures += 1
+                logger.info("cellphones %s: %s", slug, exc)
+                if failures >= CELLPHONES_MAX_FAILURES:
+                    stats["stopped"] = f"{failures} pages failed in a row"
+                    break
+                continue
+            failures = 0
+            stats["read"] += 1
+            if it is None:
+                stats["skipped"] += 1  # used goods, or no product on the page
+                gone.append(cellphones.sku_of(slug))
+            elif it.price is None:
+                stats["unpriced"] += 1
+                unpriced[it.sku] = it
+            else:
+                listed[it.sku] = it
+            if stats["read"] % CELLPHONES_SAVE_EVERY == 0:
+                await save()
+        await save()
+        # Products the sitemaps no longer list, once every file was read and
+        # the list is not suspiciously short against what we know.
+        if whole and slugs and len(slugs) >= CELLPHONES_SITEMAP_SHARE * len(read):
+            async with session_scope() as s:
+                stats["removed"] += await catalog.retire_skus(
+                    s, cellphones.CHAIN, store, now=now, keep_only=[cellphones.sku_of(x) for x in slugs]
+                )
+                await s.commit()
+        stats["sitemaps_whole"] = whole
+        stats["requests"] = cp.requests
+    return stats
+
+
+HOANGHA_SAVE_EVERY = 10  # categories read between two saves
+HOANGHA_MAX_FAILURES = 15  # candidates in a row that fail: the site is down, stop
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=3 * 3600_000)
+def refresh_hoangha() -> None:
+    result = _run(_refresh_hoangha)
+    logger.info("hoangha refresh: %r", result)
+
+
+async def _refresh_hoangha() -> dict:
+    """Every category's products at the virtual online store, saved as they
+    come; retiring waits for the end, as for Con Cưng, and only categories
+    read whole retire what they no longer list."""
+    now = datetime.now(UTC)
+    label = CHAINS[hoangha.CHAIN].label
+    async with session_scope() as s:
+        store = await catalog.ensure_online_store(s, hoangha.CHAIN, label)
+    stats = {"candidates": 0, "categories": 0, "whole": 0, "failed": 0, "items": 0, "removed": 0}
+    async with hoangha.HoangHaClient(min_interval_s=get_settings().catalog_hoangha_interval_s) as hh:
+        segments = await hh.candidates()
+        stats["candidates"] = len(segments)
+        batch: dict[str, hoangha.Item] = {}
+        whole: list[str] = []
+        failures = 0
+
+        async def save(retire: list[str]) -> None:
+            async with session_scope() as s:
+                saved = await catalog.save_items(
+                    s, hoangha.CHAIN, store, list(batch.values()), answered_menus=retire, now=now
+                )
+            stats["items"] += saved["items"]
+            stats["removed"] += saved["removed"]
+            batch.clear()
+
+        for i, seg in enumerate(segments, 1):
+            try:
+                cat = await hh.category(seg)
+            except hoangha.CatalogError as exc:  # transient errors included
+                stats["failed"] += 1
+                failures += 1
+                logger.info("hoangha %s: %s", seg, exc)
+                if failures >= HOANGHA_MAX_FAILURES:
+                    stats["stopped"] = f"{failures} categories failed in a row"
+                    break
+                continue
+            failures = 0
+            if cat is None:
+                continue
+            stats["categories"] += 1
+            for it in cat.items:
+                batch.setdefault(it.sku, it)
+            # A whole category with products may retire what it no longer
+            # lists; an empty one may be a changed layout.
+            if cat.whole and cat.items:
+                stats["whole"] += 1
+                whole.append(cat.name)
+            if i % HOANGHA_SAVE_EVERY == 0:
+                await save([])
+        await save([] if "stopped" in stats else whole)
+        stats["requests"] = hh.requests
     return stats
 
 
