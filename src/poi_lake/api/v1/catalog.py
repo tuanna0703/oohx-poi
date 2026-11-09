@@ -182,6 +182,7 @@ async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> 
         refresh_bachhoaxanh,
         refresh_cellphones,
         refresh_concung,
+        refresh_hoangha,
         refresh_winmart,
     )
 
@@ -191,6 +192,8 @@ async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> 
         refresh_concung.send()  # on demand, whatever CATALOG_CONCUNG_ENABLED says
     elif c.code == "cellphones":
         refresh_cellphones.send()
+    elif c.code == "hoangha":
+        refresh_hoangha.send()
     else:
         refresh_bachhoaxanh.send()
     return {"queued": True, "chain": c.code, "crawl_items": crawl_items and c.products}

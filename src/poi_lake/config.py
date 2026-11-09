@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     # are each re-read about once a week.
     catalog_cellphones_pages: int = Field(default=5000, alias="CATALOG_CELLPHONES_PAGES")
     catalog_cellphones_minutes: int = Field(default=180, alias="CATALOG_CELLPHONES_MINUTES")
+    # Hoàng Hà Mobile's online prices (hoanghamobile.com category pages),
+    # read daily; the operator's decision (2026-11-09). Set false to stop.
+    catalog_hoangha_enabled: bool = Field(default=True, alias="CATALOG_HOANGHA_ENABLED")
+    catalog_hoangha_interval_s: float = Field(default=1.0, alias="CATALOG_HOANGHA_INTERVAL_S")
 
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")

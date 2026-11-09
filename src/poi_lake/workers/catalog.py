@@ -9,7 +9,8 @@ chain has no product crawl. ``refresh_concung`` reads Con Cưng's online prices
 (its category pages) into one virtual store; off unless
 ``CATALOG_CONCUNG_ENABLED``. ``refresh_cellphones`` reads part of
 CellphoneS's product pages each day into its virtual store, the pages read
-longest ago first.
+longest ago first. ``refresh_hoangha`` reads Hoàng Hà Mobile's category pages
+(and their brand pages) daily into its virtual store.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
 about one request a second against winmart.vn.
 """
@@ -24,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 import dramatiq
 
-from poi_lake.catalog import bachhoaxanh, cellphones, concung
+from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha
 from poi_lake.catalog.base import CatalogTransientError
 from poi_lake.catalog.chains import CHAINS
 from poi_lake.catalog.winmart import CHAIN, WinMartClient
@@ -326,6 +327,70 @@ async def _refresh_cellphones() -> dict:
                 await s.commit()
         stats["sitemaps_whole"] = whole
         stats["requests"] = cp.requests
+    return stats
+
+
+HOANGHA_SAVE_EVERY = 10  # categories read between two saves
+HOANGHA_MAX_FAILURES = 15  # candidates in a row that fail: the site is down, stop
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=3 * 3600_000)
+def refresh_hoangha() -> None:
+    result = _run(_refresh_hoangha)
+    logger.info("hoangha refresh: %r", result)
+
+
+async def _refresh_hoangha() -> dict:
+    """Every category's products at the virtual online store, saved as they
+    come; retiring waits for the end, as for Con Cưng, and only categories
+    read whole retire what they no longer list."""
+    now = datetime.now(UTC)
+    label = CHAINS[hoangha.CHAIN].label
+    async with session_scope() as s:
+        store = await catalog.ensure_online_store(s, hoangha.CHAIN, label)
+    stats = {"candidates": 0, "categories": 0, "whole": 0, "failed": 0, "items": 0, "removed": 0}
+    async with hoangha.HoangHaClient(min_interval_s=get_settings().catalog_hoangha_interval_s) as hh:
+        segments = await hh.candidates()
+        stats["candidates"] = len(segments)
+        batch: dict[str, hoangha.Item] = {}
+        whole: list[str] = []
+        failures = 0
+
+        async def save(retire: list[str]) -> None:
+            async with session_scope() as s:
+                saved = await catalog.save_items(
+                    s, hoangha.CHAIN, store, list(batch.values()), answered_menus=retire, now=now
+                )
+            stats["items"] += saved["items"]
+            stats["removed"] += saved["removed"]
+            batch.clear()
+
+        for i, seg in enumerate(segments, 1):
+            try:
+                cat = await hh.category(seg)
+            except hoangha.CatalogError as exc:  # transient errors included
+                stats["failed"] += 1
+                failures += 1
+                logger.info("hoangha %s: %s", seg, exc)
+                if failures >= HOANGHA_MAX_FAILURES:
+                    stats["stopped"] = f"{failures} categories failed in a row"
+                    break
+                continue
+            failures = 0
+            if cat is None:
+                continue
+            stats["categories"] += 1
+            for it in cat.items:
+                batch.setdefault(it.sku, it)
+            # A whole category with products may retire what it no longer
+            # lists; an empty one may be a changed layout.
+            if cat.whole and cat.items:
+                stats["whole"] += 1
+                whole.append(cat.name)
+            if i % HOANGHA_SAVE_EVERY == 0:
+                await save([])
+        await save([] if "stopped" in stats else whole)
+        stats["requests"] = hh.requests
     return stats
 
 
