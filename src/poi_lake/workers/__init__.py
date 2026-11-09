@@ -194,7 +194,9 @@ def _start_catalog_scheduler() -> None:
                 build_daily_report,
                 queue_winmart_items,
                 refresh_bachhoaxanh,
+                refresh_cellphones,
                 refresh_concung,
+                refresh_hoangha,
                 refresh_winmart,
                 snapshot_prices,
             )
@@ -216,6 +218,16 @@ def _start_catalog_scheduler() -> None:
                 if r.set(f"poi-lake:scheduler:concung:{cday}", "1", ex=2 * 86400, nx=True):
                     refresh_concung.send()
                     logger.info("scheduled concung refresh enqueued (%s)", cday)
+            if settings.catalog_cellphones_enabled:
+                cday = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
+                if r.set(f"poi-lake:scheduler:cellphones:{cday}", "1", ex=2 * 86400, nx=True):
+                    refresh_cellphones.send()
+                    logger.info("scheduled cellphones refresh enqueued (%s)", cday)
+            if settings.catalog_hoangha_enabled:
+                cday = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
+                if r.set(f"poi-lake:scheduler:hoangha:{cday}", "1", ex=2 * 86400, nx=True):
+                    refresh_hoangha.send()
+                    logger.info("scheduled hoangha refresh enqueued (%s)", cday)
             hw = int(now // 3600)
             if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):
                 snapshot_prices.send()

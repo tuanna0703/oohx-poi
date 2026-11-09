@@ -376,29 +376,15 @@ async def stores_to_crawl(session: AsyncSession, chain: str, regions: Sequence[s
     return list(rows)
 
 
-async def save_items(
-    session: AsyncSession,
-    chain: str,
-    store_code: str,
-    items: Sequence[Item],
-    *,
-    answered_menus: Sequence[str],
-    now: datetime,
-) -> dict[str, int]:
-    """Replace one store's listing. Rows of menus that failed this time stay."""
+async def _upsert_products(
+    session: AsyncSession, chain: str, items: Sequence[Item], now: datetime
+) -> None:
     products = [
         {
             "chain": chain, "sku": it.sku, "no": it.item_no, "name": it.name,
             "folded": normalize_text(it.name), "brand": it.brand, "barcode": it.barcode,
             "uom": it.uom, "path": list(it.category_path), "seo": it.seo_name,
             "image": it.image_url, "now": now,
-        }
-        for it in items
-    ]
-    listings = [
-        {
-            "chain": chain, "store": store_code, "sku": it.sku, "menu": it.menu,
-            "price": _money(it.price), "sale": _money(it.sale_price), "now": now,
         }
         for it in items
     ]
@@ -421,6 +407,76 @@ async def save_items(
             ),
             products[i : i + BATCH],
         )
+
+
+async def save_products(session: AsyncSession, chain: str, items: Sequence[Item], *, now: datetime) -> None:
+    """Record products read but not on sale now (no listing, no price): their
+    facts and when they were read. Caller commits."""
+    await _upsert_products(session, chain, items, now)
+
+
+async def retire_skus(
+    session: AsyncSession, chain: str, store_code: str, *, now: datetime,
+    skus: Sequence[str] = (), keep_only: Sequence[str] | None = None,
+) -> int:
+    """Take products off one store's listing, noting each in the history as
+    no price: ``skus``, or, with ``keep_only``, every product not in it (for
+    a chain whose whole product list was read). Caller commits."""
+    if keep_only is not None:
+        cond, params = "NOT (sku = ANY(:keep))", {"keep": list(keep_only)}
+    elif skus:
+        cond, params = "sku = ANY(:skus)", {"skus": list(skus)}
+    else:
+        return 0
+    gone = (
+        await session.execute(
+            text(
+                f"""
+                WITH gone AS (
+                    DELETE FROM chain_store_products
+                    WHERE chain = CAST(:chain AS varchar) AND store_code = CAST(:store AS varchar)
+                      AND {cond}
+                    RETURNING sku
+                )
+                INSERT INTO chain_price_changes (chain, store_code, sku, price, sale_price, seen_at)
+                SELECT CAST(:chain AS varchar), CAST(:store AS varchar), sku, NULL, NULL,
+                       CAST(:now AS timestamptz)
+                FROM gone
+                """
+            ),
+            {"chain": chain, "store": store_code, "now": now, **params},
+        )
+    ).rowcount
+    return int(gone or 0)
+
+
+async def read_times(session: AsyncSession, chain: str) -> dict[str, datetime]:
+    """When each of a chain's products was last read, by its page slug."""
+    rows = await session.execute(
+        text("SELECT seo_name, last_seen_at FROM chain_products WHERE chain = :c AND seo_name IS NOT NULL"),
+        {"c": chain},
+    )
+    return {r.seo_name: r.last_seen_at for r in rows}
+
+
+async def save_items(
+    session: AsyncSession,
+    chain: str,
+    store_code: str,
+    items: Sequence[Item],
+    *,
+    answered_menus: Sequence[str],
+    now: datetime,
+) -> dict[str, int]:
+    """Replace one store's listing. Rows of menus that failed this time stay."""
+    listings = [
+        {
+            "chain": chain, "store": store_code, "sku": it.sku, "menu": it.menu,
+            "price": _money(it.price), "sale": _money(it.sale_price), "now": now,
+        }
+        for it in items
+    ]
+    await _upsert_products(session, chain, items, now)
     # Price history first, while chain_store_products still holds the last prices.
     for i in range(0, len(listings), BATCH):
         await session.execute(
