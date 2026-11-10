@@ -41,6 +41,11 @@ CHAINS: dict[str, Chain] = {
         "hoangha", "Hoàng Hà Mobile", ("Hoàng Hà Mobile",),
         ("retail", "retail.electronics"), products=True, online_only=True,
     ),
+    # One online price across the chain (catalog/mediamart.py).
+    "mediamart": Chain(
+        "mediamart", "MediaMart", ("MediaMart",),
+        ("retail", "retail.electronics"), products=True, online_only=True,
+    ),
 }
 
 

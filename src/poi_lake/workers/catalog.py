@@ -10,7 +10,8 @@ chain has no product crawl. ``refresh_concung`` reads Con Cưng's online prices
 ``CATALOG_CONCUNG_ENABLED``. ``refresh_cellphones`` reads part of
 CellphoneS's product pages each day into its virtual store, the pages read
 longest ago first. ``refresh_hoangha`` reads Hoàng Hà Mobile's category pages
-(and their brand pages) daily into its virtual store.
+(and their brand pages) daily into its virtual store; ``refresh_mediamart``
+reads MediaMart's category listings (and their brand filters) the same way.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
 about one request a second against winmart.vn.
 """
@@ -26,8 +27,8 @@ from zoneinfo import ZoneInfo
 
 import dramatiq
 
-from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha
-from poi_lake.catalog.base import CatalogTransientError
+from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha, mediamart
+from poi_lake.catalog.base import CatalogError, CatalogTransientError
 from poi_lake.catalog.chains import CHAINS
 from poi_lake.catalog.winmart import CHAIN, WinMartClient
 from poi_lake.config import get_settings
@@ -388,15 +389,35 @@ def refresh_hoangha() -> None:
 
 
 async def _refresh_hoangha() -> dict:
-    """Every category's products at the virtual online store, saved as they
-    come; retiring waits for the end, as for Con Cưng, and only categories
-    read whole retire what they no longer list."""
+    return await _refresh_categories(
+        hoangha.CHAIN,
+        hoangha.HoangHaClient(min_interval_s=get_settings().catalog_hoangha_interval_s),
+    )
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=3 * 3600_000)
+def refresh_mediamart() -> None:
+    result = _run(_refresh_mediamart)
+    logger.info("mediamart refresh: %r", result)
+
+
+async def _refresh_mediamart() -> dict:
+    return await _refresh_categories(
+        mediamart.CHAIN,
+        mediamart.MediaMartClient(min_interval_s=get_settings().catalog_mediamart_interval_s),
+    )
+
+
+async def _refresh_categories(chain: str, client: hoangha.HoangHaClient | mediamart.MediaMartClient) -> dict:
+    """Every category's products at the chain's virtual online store, saved
+    as they come; retiring waits for the end, as for Con Cưng, and only
+    categories read whole retire what they no longer list."""
     now = datetime.now(UTC)
-    label = CHAINS[hoangha.CHAIN].label
+    label = CHAINS[chain].label
     async with session_scope() as s:
-        store = await catalog.ensure_online_store(s, hoangha.CHAIN, label)
+        store = await catalog.ensure_online_store(s, chain, label)
     stats = {"candidates": 0, "categories": 0, "whole": 0, "failed": 0, "items": 0, "removed": 0}
-    async with hoangha.HoangHaClient(min_interval_s=get_settings().catalog_hoangha_interval_s) as hh:
+    async with client as hh:
         segments = await hh.candidates()
         stats["candidates"] = len(segments)
         batch: dict[str, hoangha.Item] = {}
@@ -406,7 +427,7 @@ async def _refresh_hoangha() -> dict:
         async def save(retire: list[str]) -> None:
             async with session_scope() as s:
                 saved = await catalog.save_items(
-                    s, hoangha.CHAIN, store, list(batch.values()), answered_menus=retire, now=now
+                    s, chain, store, list(batch.values()), answered_menus=retire, now=now
                 )
             stats["items"] += saved["items"]
             stats["removed"] += saved["removed"]
@@ -415,10 +436,10 @@ async def _refresh_hoangha() -> dict:
         for i, seg in enumerate(segments, 1):
             try:
                 cat = await hh.category(seg)
-            except hoangha.CatalogError as exc:  # transient errors included
+            except CatalogError as exc:  # transient errors included
                 stats["failed"] += 1
                 failures += 1
-                logger.info("hoangha %s: %s", seg, exc)
+                logger.info("%s %s: %s", chain, seg, exc)
                 if failures >= HOANGHA_MAX_FAILURES:
                     stats["stopped"] = f"{failures} categories failed in a row"
                     break

@@ -183,6 +183,7 @@ async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> 
         refresh_cellphones,
         refresh_concung,
         refresh_hoangha,
+        refresh_mediamart,
         refresh_winmart,
     )
 
@@ -194,6 +195,8 @@ async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> 
         refresh_cellphones.send()
     elif c.code == "hoangha":
         refresh_hoangha.send()
+    elif c.code == "mediamart":
+        refresh_mediamart.send()
     else:
         refresh_bachhoaxanh.send()
     return {"queued": True, "chain": c.code, "crawl_items": crawl_items and c.products}
