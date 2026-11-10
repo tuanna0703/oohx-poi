@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     # read daily; the operator's decision (2026-11-09). Set false to stop.
     catalog_hoangha_enabled: bool = Field(default=True, alias="CATALOG_HOANGHA_ENABLED")
     catalog_hoangha_interval_s: float = Field(default=1.0, alias="CATALOG_HOANGHA_INTERVAL_S")
+    # MediaMart's online prices (mediamart.vn category listings), read daily;
+    # the operator's decision (2026-11-10). Set false to stop.
+    catalog_mediamart_enabled: bool = Field(default=True, alias="CATALOG_MEDIAMART_ENABLED")
+    catalog_mediamart_interval_s: float = Field(default=1.0, alias="CATALOG_MEDIAMART_INTERVAL_S")
 
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")
