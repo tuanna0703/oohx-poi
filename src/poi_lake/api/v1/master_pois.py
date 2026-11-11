@@ -232,6 +232,10 @@ async def list_brands(
         """
     )
     rows = (await session.execute(sql, {**params, "social": _NOT_OWN_SITE})).all()
+    from poi_lake.catalog.brand_owners import slugify
+    from poi_lake.services.logos import logo_paths
+
+    logos = await logo_paths(session, [r.brand for r in rows])
     return [
         BrandSummary(
             brand=r.brand,
@@ -240,6 +244,7 @@ async def list_brands(
             sample_master_ids=list(r.sample_ids) if r.sample_ids else [],
             website=r.website,
             website_stores=int(r.website_stores),
+            logo_url=logos.get(slugify(r.brand)),
             industry=r.industry,
             confidence=r.confidence,
             verdict=r.verdict,

@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.catalog.brand_owners import BrandOwner, owner_of
+from poi_lake.services.logos import logo_paths
 
 CACHE_S = 600
 COMPARE_LIMIT = 8  # brands or companies shown side by side
@@ -109,6 +110,14 @@ def _product(p: Product) -> dict[str, Any]:
             "on_sale": p.on_sale}
 
 
+async def _with_logos(session: AsyncSession, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each brand row with its ``logo_url`` ("/logos/…", null when none yet)."""
+    paths = await logo_paths(session, [r["slug"] for r in rows])
+    for r in rows:
+        r["logo_url"] = paths.get(r["slug"])
+    return rows
+
+
 def _main(values: list[str | None]) -> str | None:
     c = Counter(v for v in values if v)
     return c.most_common(1)[0][0] if c else None
@@ -127,7 +136,7 @@ async def brands(session: AsyncSession, chain: str, company_slug: str | None = N
         for ps in by.values()
     ]
     rows.sort(key=lambda r: (-r["skus"], r["name"]))
-    return {"chain": chain, "stores_total": stores_total, "brands": rows}
+    return {"chain": chain, "stores_total": stores_total, "brands": await _with_logos(session, rows)}
 
 
 async def brand_detail(session: AsyncSession, chain: str, slug: str) -> dict[str, Any] | None:
@@ -172,9 +181,12 @@ async def brand_detail(session: AsyncSession, chain: str, slug: str) -> dict[str
         siblings = sorted(({**_brand(ps[0].owner), "skus": len(ps)} for ps in sib.values()),
                           key=lambda r: (-r["skus"], r["name"]))
     prices = [p.price for p in mine if p.price is not None]
+    (brand,) = await _with_logos(session, [_brand(owner)])
+    await _with_logos(session, compare)
+    await _with_logos(session, siblings)
     return {
         "chain": chain,
-        "brand": _brand(owner),
+        "brand": brand,
         "stores_total": stores_total,
         "stores": stores,
         "category": category,

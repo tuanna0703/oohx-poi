@@ -499,3 +499,32 @@ async def _crawl_winmart_store(store_code: str) -> dict:
     async with session_scope() as s:
         saved = await catalog.save_items(s, CHAIN, store_code, items, answered_menus=answered, now=now)
     return {**saved, "failed_menus": failed}
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=0, time_limit=3 * 3600_000)
+def refresh_logos() -> None:
+    """Weekly: look for logos of the brands that have none yet, most stores
+    and products first (services/logos.py)."""
+    result = _run(_refresh_logos)
+    logger.info("logos refresh: %r", result)
+
+
+async def _refresh_logos() -> dict:
+    from collections import Counter
+
+    from poi_lake.services import logos
+
+    st = get_settings()
+    async with session_scope() as s:
+        todo = await logos.candidates(s, limit=st.logos_per_run, retry_days=st.logos_retry_days)
+    stats: Counter[str] = Counter()
+    async with logos.LogoFinder(min_interval_s=1.0) as finder:
+        for brand in todo:
+            try:
+                async with session_scope() as s:
+                    stats[await logos.find_one(s, finder, brand, st.logos_dir)] += 1
+            except Exception:  # one brand's odd page must not end the run
+                logger.exception("logo %s failed", brand.slug)
+                stats["failed"] += 1
+        stats["requests"] = finder.requests
+    return {"brands": len(todo), **stats}

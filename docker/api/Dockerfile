@@ -50,7 +50,8 @@ COPY --chown=poi:poi migrations ./migrations
 COPY --chown=poi:poi alembic.ini ./alembic.ini
 COPY --chown=poi:poi scripts ./scripts
 
-RUN mkdir -p /app/models && chown -R poi:poi /app
+# /app/logos: brand logos (a named volume in production takes this owner).
+RUN mkdir -p /app/models /app/logos && chown -R poi:poi /app
 USER poi
 
 EXPOSE 8000

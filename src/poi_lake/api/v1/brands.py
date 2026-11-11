@@ -7,8 +7,11 @@
   POST /api/v1/brands/quality/apply   untag stores not carrying their brand (logged)
   POST /api/v1/brands/quality/undo/{run_id}
   GET|PUT /api/v1/brands/quality/settings   {"apply": bool}: clean up daily
+  GET /api/v1/brands/{name}/logo      the brand's logo: file, source, licence
+  PUT /api/v1/brands/{name}/logo      {"url": …}: an admin's logo, never replaced by the crawler
+  DELETE /api/v1/brands/{name}/logo   drop it; the weekly search may find one again
 
-The quality list needs ``read:master``; everything else ``write:brands``.
+The quality list and GET logo need ``read:master``; everything else ``write:brands``.
 """
 
 from __future__ import annotations
@@ -22,7 +25,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_permission
-from poi_lake.services import app_settings, brand_cleanup, brand_quality
+from poi_lake.catalog.brand_owners import slugify
+from poi_lake.config import get_settings
+from poi_lake.services import app_settings, brand_cleanup, brand_quality, logos
 from poi_lake.services.brands import add_brand_sweeps, brand_progress, retag, upsert_brand
 
 logger = logging.getLogger(__name__)
@@ -160,3 +165,69 @@ async def get_progress(
 ) -> dict[str, Any]:
     name = " ".join(name.split())
     return await brand_progress(session, name, _clean(search_terms, 40) or [name[:40]])
+
+
+class LogoIn(BaseModel):
+    url: str = Field(min_length=10, max_length=2000, description="A PNG, JPEG, WebP, GIF or ICO image, 64 px or more")
+
+
+def _logo_out(slug: str, r: Any) -> dict[str, Any]:
+    return {"slug": slug, "name": r.name, "status": r.status,
+            "logo_url": f"/logos/{r.file}" if r.file and r.status == "ok" else None,
+            "source": r.source, "source_url": r.source_url, "license": r.license,
+            "width": r.width, "height": r.height, "manual": r.manual,
+            "checked_at": r.checked_at.isoformat() if r.checked_at else None}
+
+
+async def _logo_row(session: AsyncSession, slug: str) -> Any:
+    return (
+        await session.execute(
+            text("SELECT name, status, file, source, source_url, license, width, height, manual, checked_at "
+                 "FROM brand_logos WHERE slug = :s"),
+            {"s": slug},
+        )
+    ).first()
+
+
+@router.get("/{name}/logo", dependencies=[Depends(require_permission("read:master"))])
+async def get_logo(name: str, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    slug = slugify(name)
+    row = await _logo_row(session, slug)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no logo searched for this brand yet")
+    return _logo_out(slug, row)
+
+
+@router.put("/{name}/logo", dependencies=[_perm])
+async def put_logo(name: str, body: LogoIn, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    """Fetch the image, check and shrink it, keep it as this brand's logo."""
+    name = " ".join(name.split())
+    slug = slugify(name)
+    if not slug:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "empty brand name")
+    url = body.url.strip()
+    if not logos.public_url(url):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "the URL must be a public http(s) address")
+    async with logos.LogoFinder(min_interval_s=0) as finder:
+        try:
+            logo = await finder.fetch(url)
+        except logos.LogoError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"not a usable logo: {exc}") from exc
+    d = get_settings().logos_dir
+    old = await logos.current_file(session, slug)
+    file = logos.write_file(d, slug, logo)
+    await logos.save_found(session, slug, name, file, logos.Found(url=url, source="manual"), logo, manual=True)
+    await session.commit()
+    if old and old != file:
+        logos.remove_file(d, old)
+    return _logo_out(slug, await _logo_row(session, slug))
+
+
+@router.delete("/{name}/logo", dependencies=[_perm])
+async def delete_logo(name: str, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    slug = slugify(name)
+    old = await logos.current_file(session, slug)
+    n = (await session.execute(text("DELETE FROM brand_logos WHERE slug = :s"), {"s": slug})).rowcount
+    await session.commit()
+    logos.remove_file(get_settings().logos_dir, old)
+    return {"slug": slug, "removed": int(n or 0)}

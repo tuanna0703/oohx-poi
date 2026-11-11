@@ -50,7 +50,8 @@ services:
       # Override the dev compose's hardcoded ``poi:poi`` URL with the real
       # password from .env. Same shape, just interpolated.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-poi}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-poi_lake}
-    volumes: !reset []                  # drop the dev source mounts
+    volumes: !reset                     # drop the dev source mounts
+      - poi_logos:/app/logos            # brand logos, served at /logos
     ports:
       - "8000:8000"
     deploy:
@@ -86,7 +87,8 @@ services:
       APP_ENV: production
       APP_LOG_LEVEL: INFO
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-poi}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-poi_lake}
-    volumes: !reset []
+    volumes: !reset
+      - poi_logos:/app/logos            # brand logos, found and written here
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 384M }
@@ -153,3 +155,5 @@ volumes:
     name: poi_prometheus_data
   poi_grafana_data:
     name: poi_grafana_data
+  poi_logos:
+    name: poi_logos

@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -81,6 +82,8 @@ app = FastAPI(
 )
 app.add_middleware(PrometheusMiddleware)
 app.include_router(api_v1_router)
+# Brand logos (services/logos.py): <slug>-<sha10>.png, a new name for each new image.
+app.mount("/logos", StaticFiles(directory=get_settings().logos_dir, check_dir=False), name="logos")
 
 
 @app.get("/health", tags=["health"])
