@@ -149,7 +149,8 @@ async def save_stores(
             await session.execute(
                 text(
                     "UPDATE chain_stores SET active = false "
-                    "WHERE chain = :c AND active AND last_seen_at < :now"
+                    "WHERE chain = :c AND active AND last_seen_at < :now "
+                    "AND store_type IS DISTINCT FROM 'ONLINE'"
                 ),
                 {"c": chain, "now": now},
             )
@@ -448,6 +449,19 @@ async def retire_skus(
         )
     ).rowcount
     return int(gone or 0)
+
+
+async def known_brands(session: AsyncSession, chains: Sequence[str]) -> dict[str, str]:
+    """The brand known for each product code (``item_no``) among chains that
+    share codes (Pico and Nguyễn Kim)."""
+    rows = await session.execute(
+        text(
+            "SELECT item_no, brand FROM chain_products "
+            "WHERE chain = ANY(:c) AND brand IS NOT NULL AND item_no IS NOT NULL"
+        ),
+        {"c": list(chains)},
+    )
+    return {r.item_no: r.brand for r in rows}
 
 
 async def read_times(session: AsyncSession, chain: str) -> dict[str, datetime]:

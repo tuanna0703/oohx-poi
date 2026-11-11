@@ -198,6 +198,7 @@ def _start_catalog_scheduler() -> None:
                 refresh_concung,
                 refresh_hoangha,
                 refresh_mediamart,
+                refresh_picogroup,
                 refresh_winmart,
                 snapshot_prices,
             )
@@ -234,6 +235,12 @@ def _start_catalog_scheduler() -> None:
                 if r.set(f"poi-lake:scheduler:mediamart:{cday}", "1", ex=2 * 86400, nx=True):
                     refresh_mediamart.send()
                     logger.info("scheduled mediamart refresh enqueued (%s)", cday)
+            if settings.catalog_picogroup_enabled:
+                cday = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
+                for pchain in ("pico", "nguyenkim"):
+                    if r.set(f"poi-lake:scheduler:{pchain}:{cday}", "1", ex=2 * 86400, nx=True):
+                        refresh_picogroup.send(pchain)
+                        logger.info("scheduled %s refresh enqueued (%s)", pchain, cday)
             hw = int(now // 3600)
             if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):
                 snapshot_prices.send()
