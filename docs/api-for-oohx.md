@@ -196,6 +196,24 @@ curl -G https://api.poi.oohx.net/api/v1/master-pois/brands \
 ]
 ```
 
+### Brand logos
+
+Brand rows carry `logo_url`: `/master-pois/brands`, `/catalog/{chain}/brands`
+and a brand page's `brand`, `compare` and `siblings`. It is a path on this
+host (`/logos/<slug>-<hash>.png`, a PNG of at most 256 × 256), or `null` while
+no logo is known. Prefix it with `https://api.poi.oohx.net`. The file name
+changes whenever the image does, so it can be cached for good.
+
+One logo serves every brand of the same name, store brand or product brand.
+A weekly search fills them from Wikidata (with its licence) and the brand's
+own website. An admin can set or replace one:
+
+| | |
+|---|---|
+| `GET /brands/{name}/logo` | its file, source, source URL, licence, size (`read:master`) |
+| `PUT /brands/{name}/logo` `{"url": "https://…"}` | fetch, check (raster, 64 px or more), keep; never replaced by the search (`write:brands`) |
+| `DELETE /brands/{name}/logo` | drop it; the next weekly search may find one (`write:brands`) |
+
 ## Data model notes
 
 * **`master_pois`** is the curated, deduplicated layer. There is at most

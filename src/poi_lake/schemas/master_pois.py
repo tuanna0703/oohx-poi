@@ -98,6 +98,8 @@ class BrandSummary(BaseModel):
     # The domain most of its stores link to (not a social page), and how many do.
     website: str | None = None
     website_stores: int = 0
+    # "/logos/<file>.png" on this API host (services/logos.py), null when none yet.
+    logo_url: str | None = None
     # From the daily brand quality check (services/brand_quality.py); null
     # until a brand was assessed. ``industry`` is bizmap's industry key;
     # "hide" = few stores carry the name; ``merge_into`` = the brand it is a

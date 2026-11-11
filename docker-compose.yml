@@ -67,6 +67,7 @@ services:
       - ./tests:/app/tests:ro
       - ./pyproject.toml:/app/pyproject.toml:ro
       - model_cache:/app/models
+      - logos:/app/logos
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,6 +120,7 @@ services:
     command: ["dramatiq", "poi_lake.workers", "--processes", "1", "--threads", "1", "--queues", "catalog"]
     volumes:
       - ./src:/app/src:ro
+      - logos:/app/logos  # brand logos, written here, served by api
     depends_on:
       postgres:
         condition: service_healthy
@@ -157,3 +159,4 @@ volumes:
   postgres_data:
   redis_data:
   model_cache:
+  logos:

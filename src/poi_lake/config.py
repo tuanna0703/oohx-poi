@@ -126,6 +126,15 @@ class Settings(BaseSettings):
     catalog_mediamart_enabled: bool = Field(default=True, alias="CATALOG_MEDIAMART_ENABLED")
     catalog_mediamart_interval_s: float = Field(default=1.0, alias="CATALOG_MEDIAMART_INTERVAL_S")
 
+    # ---- Brand logos (services/logos.py) ----
+    # Found weekly from Wikidata and each brand's own website, kept as 256 px
+    # PNGs in LOGOS_DIR (a volume shared by api and catalog) and served at /logos.
+    logos_enabled: bool = Field(default=True, alias="LOGOS_ENABLED")
+    logos_dir: str = Field(default="/app/logos", alias="LOGOS_DIR")
+    logos_per_run: int = Field(default=300, alias="LOGOS_PER_RUN")
+    # A brand whose search found nothing is tried again after this many days.
+    logos_retry_days: int = Field(default=30, alias="LOGOS_RETRY_DAYS")
+
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")
     dedupe_auto_merge_threshold: float = Field(

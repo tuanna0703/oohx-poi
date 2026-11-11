@@ -197,6 +197,7 @@ def _start_catalog_scheduler() -> None:
                 refresh_cellphones,
                 refresh_concung,
                 refresh_hoangha,
+                refresh_logos,
                 refresh_mediamart,
                 refresh_winmart,
                 snapshot_prices,
@@ -234,6 +235,12 @@ def _start_catalog_scheduler() -> None:
                 if r.set(f"poi-lake:scheduler:mediamart:{cday}", "1", ex=2 * 86400, nx=True):
                     refresh_mediamart.send()
                     logger.info("scheduled mediamart refresh enqueued (%s)", cday)
+            # Brand logos once a week.
+            if settings.logos_enabled:
+                week = int(now // (7 * 86400))
+                if r.set(f"poi-lake:scheduler:logos:{week}", "1", ex=8 * 86400, nx=True):
+                    refresh_logos.send()
+                    logger.info("scheduled logos refresh enqueued (week=%d)", week)
             hw = int(now // 3600)
             if r.set(f"poi-lake:scheduler:price-snapshot:{hw}", "1", ex=3610, nx=True):
                 snapshot_prices.send()
