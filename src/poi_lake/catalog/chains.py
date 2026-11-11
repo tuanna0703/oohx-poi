@@ -46,6 +46,16 @@ CHAINS: dict[str, Chain] = {
         "mediamart", "MediaMart", ("MediaMart",),
         ("retail", "retail.electronics"), products=True, online_only=True,
     ),
+    # One online price across the chain, at a virtual store (catalog/picogroup.py);
+    # Pico's own stores come from the group's store list.
+    "pico": Chain(
+        "pico", "Pico", ("Pico",),
+        ("retail", "retail.electronics"), products=True,
+    ),
+    "nguyenkim": Chain(
+        "nguyenkim", "Nguyễn Kim", ("Nguyen Kim",),
+        ("retail", "retail.electronics"), products=True, online_only=True,
+    ),
 }
 
 
@@ -62,4 +72,8 @@ def display_name(chain: str, name: str, address: str | None, store_type: str | N
         # for the store, without its brand and province code.
         rest = re.sub(r"^WM\+?\s+[A-Z]{3}\s+", "", name).strip()
         return f"{brand} {rest if rest and rest != name else street}".strip()
+    if chain == "pico":
+        # "76 Nguyễn Trãi - HN" → "Điện máy Pico 76 Nguyễn Trãi"
+        rest = re.sub(r"\s+-\s+[A-Z]{2,3}$", "", name).strip()
+        return f"Điện máy Pico {rest or street}".strip()
     return name

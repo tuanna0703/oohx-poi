@@ -12,6 +12,8 @@ CellphoneS's product pages each day into its virtual store, the pages read
 longest ago first. ``refresh_hoangha`` reads Hoàng Hà Mobile's category pages
 (and their brand pages) daily into its virtual store; ``refresh_mediamart``
 reads MediaMart's category listings (and their brand filters) the same way.
+``refresh_picogroup`` reads Pico's or Nguyễn Kim's whole assortment from the
+group's catalogue API daily, and Pico's stores from its store list.
 One worker thread and ``CATALOG_MIN_INTERVAL_S`` between requests keep us at
 about one request a second against winmart.vn.
 """
@@ -22,12 +24,15 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import dramatiq
+from sqlalchemy import text
 
-from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha, mediamart
+from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha, mediamart, picogroup
 from poi_lake.catalog.base import CatalogError, CatalogTransientError
 from poi_lake.catalog.chains import CHAINS
 from poi_lake.catalog.winmart import CHAIN, WinMartClient
@@ -459,6 +464,97 @@ async def _refresh_categories(chain: str, client: hoangha.HoangHaClient | mediam
                 await save([])
         await save([] if "stopped" in stats else whole)
         stats["requests"] = hh.requests
+    return stats
+
+
+PICO_SAVE_EVERY = 500  # products between two saves
+# Below this share of the products already listed, the API's answer is taken
+# as partial and retires nothing.
+PICO_LIST_SHARE = 0.9
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=1, min_backoff=600_000, time_limit=3 * 3600_000)
+def refresh_picogroup(chain: str) -> None:
+    result = _run(lambda: _refresh_picogroup(chain))
+    logger.info("%s refresh: %r", chain, result)
+
+
+async def _refresh_picogroup(chain: str) -> dict:
+    """The chain's whole assortment at its virtual online store; brands from
+    product pages, at most ``CATALOG_PICOGROUP_PAGES`` a run, each code read
+    once for both chains; then, for Pico, its stores."""
+    settings = get_settings()
+    site = picogroup.SITES[chain]
+    now = datetime.now(UTC)
+    async with session_scope() as s:
+        store = await catalog.ensure_online_store(s, chain, CHAINS[chain].label)
+        brands = await catalog.known_brands(s, list(picogroup.SITES))
+        listed_before = (await s.execute(
+            text("SELECT count(*) FROM chain_store_products WHERE chain = :c AND store_code = :s"),
+            {"c": chain, "s": store},
+        )).scalar_one()
+    stats: dict[str, Any] = {"products": 0, "listed": 0, "unpriced": 0, "skipped": 0,
+                             "brands_read": 0, "brands_failed": 0, "removed": 0}
+    async with picogroup.PicoGroupClient(site, min_interval_s=settings.catalog_picogroup_interval_s) as pg:
+        rows, whole = await pg.products()
+        stats["products"] = len(rows)
+        items = []
+        for d in rows:
+            it = picogroup.parse_product(d, brands.get(str(d.get("code"))))
+            if it is None:
+                stats["skipped"] += 1
+            else:
+                items.append(it)
+        # Brands the lake lacks, from the product pages, priced products first.
+        todo = [it for it in items if it.brand is None and it.seo_name]
+        todo.sort(key=lambda it: it.price is None)
+        found: dict[str, str] = {}
+        for it in todo[: settings.catalog_picogroup_pages]:
+            try:
+                b = await pg.brand(it.seo_name or "")
+            except picogroup.CatalogError as exc:  # gone, or transient
+                stats["brands_failed"] += 1
+                logger.info("%s %s: %s", chain, it.seo_name, exc)
+                continue
+            stats["brands_read"] += 1
+            if b:
+                found[it.sku] = b
+        items = [replace(it, brand=found.get(it.sku, it.brand)) for it in items]
+        priced = [it for it in items if it.price is not None]
+        unpriced = [it for it in items if it.price is None]
+        stats["listed"], stats["unpriced"] = len(priced), len(unpriced)
+        async with session_scope() as s:
+            if unpriced:
+                await catalog.save_products(s, chain, unpriced, now=now)
+                stats["removed"] += await catalog.retire_skus(
+                    s, chain, store, now=now, skus=[it.sku for it in unpriced]
+                )
+                await s.commit()
+            for i in range(0, len(priced), PICO_SAVE_EVERY):
+                await catalog.save_items(
+                    s, chain, store, priced[i : i + PICO_SAVE_EVERY], answered_menus=[], now=now
+                )
+        # Products the API no longer lists, when its answer was whole and not
+        # suspiciously short against what we list.
+        if whole and priced and len(priced) >= PICO_LIST_SHARE * listed_before:
+            async with session_scope() as s:
+                stats["removed"] += await catalog.retire_skus(
+                    s, chain, store, now=now, keep_only=[it.sku for it in priced]
+                )
+                await s.commit()
+        stats["whole"] = whole
+        if not CHAINS[chain].online_only:
+            try:
+                stores = await pg.stores()
+            except picogroup.CatalogError as exc:
+                stats["stores"] = f"failed: {exc}"
+                stores = []
+            async with session_scope() as s:
+                if stores:
+                    saved = await catalog.save_stores(s, chain, stores, now=now, complete=True)
+                    matched = await catalog.match_stores(s, chain, CHAINS[chain].brands)
+                    stats["stores"] = {**saved, **matched}
+        stats["requests"] = pg.requests
     return stats
 
 

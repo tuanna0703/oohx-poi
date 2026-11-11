@@ -125,6 +125,13 @@ class Settings(BaseSettings):
     # the operator's decision (2026-11-10). Set false to stop.
     catalog_mediamart_enabled: bool = Field(default=True, alias="CATALOG_MEDIAMART_ENABLED")
     catalog_mediamart_interval_s: float = Field(default=1.0, alias="CATALOG_MEDIAMART_INTERVAL_S")
+    # Pico's and Nguyễn Kim's online prices (the group's catalogue API) and
+    # Pico's stores, read daily; the operator's decision (2026-11-11). Set
+    # false to stop. Product pages read a run for brands the lake lacks
+    # (~100 KB each; a code's brand is read once for both chains).
+    catalog_picogroup_enabled: bool = Field(default=True, alias="CATALOG_PICOGROUP_ENABLED")
+    catalog_picogroup_interval_s: float = Field(default=1.0, alias="CATALOG_PICOGROUP_INTERVAL_S")
+    catalog_picogroup_pages: int = Field(default=1500, alias="CATALOG_PICOGROUP_PAGES")
 
     # ---- Pipeline ----
     dedupe_cluster_eps_meters: float = Field(default=55.0, alias="DEDUPE_CLUSTER_EPS_METERS")
