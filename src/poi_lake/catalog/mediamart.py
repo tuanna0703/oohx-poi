@@ -72,7 +72,11 @@ _CARD = re.compile(
 _NAME = re.compile(r"product-name[\"']?>\s*(.*?)\s*</p>", re.S)
 _PRICE = re.compile(r"product-price[\"']?>\s*([^<]*?)\s*</p>")
 _REGULAR = re.compile(r"product-price-regular[\"']?>\s*<span>\s*([^<]*?)\s*</span>")
+# A card's ``src`` is a WebP rendition the CDN lacks for about one product in
+# four; the page falls back to ``data-src``, the uploaded picture, on error.
+# We keep the fallback, which is always there, else the rendition.
 _IMG = re.compile(r"""<img\b[^>]*?\bsrc=["']?([^"'\s>]+)""")
+_IMG_ORIGINAL = re.compile(r"""<img\b[^>]*?\bdata-src=["']?([^"'\s>]+)""")
 _IMAGE = re.compile(r"^https://cdn\d*\.mediamart\.vn/\S+$")
 
 
@@ -153,7 +157,7 @@ def parse_cards(html: str, menu: str, brand: str | None = None) -> list[Card]:
         reg = _REGULAR.search(inner)
         listed = _money(reg.group(1)) if reg else None
         price, sale = (listed, selling) if listed is not None and listed > selling else (selling, None)
-        img = _IMG.search(inner)
+        img = _IMG_ORIGINAL.search(inner) or _IMG.search(inner)
         image = html_lib.unescape(img.group(1) if img else "").strip()
         out[pid] = Card(pid, Item(
             sku=sku_of(slug),
