@@ -1112,3 +1112,73 @@ async def chain_counts(session: AsyncSession) -> dict[str, dict[str, Any]]:
         )
     ).mappings().all()
     return {r["chain"]: dict(r) for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Official stores: masters matched to a chain's own store list
+
+# A master is official while an active store of a chain's list is matched to
+# it; it was official until the list dropped that store (``active`` false).
+OFFICIAL_SELECT = """
+  EXISTS (SELECT 1 FROM chain_stores cs WHERE cs.master_id = master_pois.id AND cs.active) AS official,
+  (SELECT max(cs.last_seen_at) FROM chain_stores cs
+     WHERE cs.master_id = master_pois.id AND cs.active) AS official_seen_at,
+  (SELECT max(cs.last_seen_at) FROM chain_stores cs
+     WHERE cs.master_id = master_pois.id AND NOT cs.active) AS official_removed_at
+"""
+OFFICIAL_WHERE = "EXISTS (SELECT 1 FROM chain_stores cs WHERE cs.master_id = master_pois.id AND cs.active)"
+
+
+def official_entry(chain: Any, stores: int, at: datetime | None) -> dict[str, Any]:
+    """A brand's official-list facts from the chain whose list it is."""
+    return {
+        "official_list": True,
+        "official_complete": bool(chain.official_complete),
+        "official_stores": int(stores),
+        "official_at": at,
+        "official_chain": chain.code,
+    }
+
+
+def official_fields(entry: dict[str, Any] | None) -> dict[str, Any]:
+    """The official-list fields of a chain or brand, all false when it has none."""
+    if not entry:
+        return {"official_list": False, "official_complete": False, "official_stores": 0, "official_at": None}
+    return {k: entry[k] for k in ("official_list", "official_complete", "official_stores", "official_at")}
+
+
+async def official_brands(session: AsyncSession, chains: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per brand with a store list of its own: whether that list is
+    complete, how many active masters it matched, and when it was last read."""
+    at = dict(
+        (
+            await session.execute(
+                text(
+                    "SELECT chain, max(last_seen_at) FROM chain_stores "
+                    "WHERE active AND store_type IS DISTINCT FROM 'ONLINE' GROUP BY chain"
+                )
+            )
+        ).all()
+    )
+    matched: dict[tuple[str, str], int] = {
+        (r.chain, r.brand): int(r.n)
+        for r in (
+            await session.execute(
+                text(
+                    """
+                    SELECT cs.chain, m.brand, count(DISTINCT m.id) AS n
+                    FROM chain_stores cs JOIN master_pois m ON m.id = cs.master_id
+                    WHERE cs.active AND m.status = 'active' AND m.brand IS NOT NULL
+                    GROUP BY cs.chain, m.brand
+                    """
+                )
+            )
+        ).all()
+    }
+    out: dict[str, dict[str, Any]] = {}
+    for c in chains.values():
+        if c.online_only or c.code not in at:
+            continue
+        for b in c.brands:
+            out.setdefault(b, official_entry(c, matched.get((c.code, b), 0), at[c.code]))
+    return out

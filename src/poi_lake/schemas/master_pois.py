@@ -43,6 +43,13 @@ class MasterPOIOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Matched to an active store of a chain's own store list (pico.vn/store,
+    # nguyenkim.com/store…), when that list last named it; or when the list
+    # dropped it (``official`` false then).
+    official: bool = False
+    official_seen_at: datetime | None = None
+    official_removed_at: datetime | None = None
+
 
 class MasterPOIList(BaseModel):
     items: list[MasterPOIOut]
@@ -82,6 +89,7 @@ class SearchRequest(BaseModel):
     )
     category: str | None = None
     brand: str | None = None
+    official: bool | None = Field(default=None, description="matched to a chain's own store list")
     province_code: str | None = None
     district_code: str | None = None
     ward_code: str | None = None
@@ -107,3 +115,11 @@ class BrandSummary(BaseModel):
     verdict: str | None = None
     name_share: float | None = None
     merge_into: str | None = None
+    # The brand's own store list, when a chain's is read: complete (every shop
+    # it has, so a site may show only those) or not (WinMart's lists only the
+    # stores taking online orders), masters it matched, when it was last read.
+    official_list: bool = False
+    official_complete: bool = False
+    official_stores: int = 0
+    official_at: datetime | None = None
+    official_chain: str | None = None

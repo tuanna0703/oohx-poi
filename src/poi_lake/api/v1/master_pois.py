@@ -21,6 +21,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session
+from poi_lake.catalog.chains import CHAINS
 from poi_lake.db.models import MasterPOI, MasterPOIHistory
 from poi_lake.schemas import (
     BrandSummary,
@@ -30,6 +31,7 @@ from poi_lake.schemas import (
     SearchRequest,
     SourceRefOut,
 )
+from poi_lake.services import catalog
 from poi_lake.services.rate_limit import (
     require_permission_with_rate_limit as require_permission,
 )
@@ -50,7 +52,8 @@ SELECT
   openooh_category, openooh_subcategory, brand,
   province_code, district_code, ward_code,
   sources_count, confidence, quality_score, dooh_score,
-  status, version, created_at, updated_at
+  status, version, created_at, updated_at,
+""" + catalog.OFFICIAL_SELECT + """
 FROM master_pois
 """
 
@@ -79,6 +82,9 @@ def _row_to_out(row: Any) -> MasterPOIOut:
         version=int(row.version),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        official=bool(getattr(row, "official", False)),
+        official_seen_at=getattr(row, "official_seen_at", None),
+        official_removed_at=getattr(row, "official_removed_at", None),
     )
 
 
@@ -97,6 +103,10 @@ async def list_master_pois(
     district_code: str | None = Query(default=None, max_length=20),
     ward_code: str | None = Query(default=None, max_length=20),
     min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    official: bool | None = Query(
+        default=None,
+        description="true: only masters matched to a store on the chain's own list; false: only the others",
+    ),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
@@ -124,6 +134,8 @@ async def list_master_pois(
     if brand:
         clauses.append("brand = :brand")
         params["brand"] = brand
+    if official is not None:
+        clauses.append(catalog.OFFICIAL_WHERE if official else f"NOT {catalog.OFFICIAL_WHERE}")
     if province_code:
         clauses.append("province_code = :prov")
         params["prov"] = province_code
@@ -232,6 +244,7 @@ async def list_brands(
         """
     )
     rows = (await session.execute(sql, {**params, "social": _NOT_OWN_SITE})).all()
+    official = await catalog.official_brands(session, CHAINS)
     return [
         BrandSummary(
             brand=r.brand,
@@ -245,6 +258,7 @@ async def list_brands(
             verdict=r.verdict,
             name_share=r.name_share,
             merge_into=r.merge_into,
+            **official.get(r.brand, {}),
         )
         for r in rows
     ]
@@ -369,6 +383,8 @@ async def search_master_pois(
     if body.brand:
         clauses.append("brand = :brand")
         params["brand"] = body.brand
+    if body.official is not None:
+        clauses.append(catalog.OFFICIAL_WHERE if body.official else f"NOT {catalog.OFFICIAL_WHERE}")
     if body.province_code:
         clauses.append("province_code = :prov")
         params["prov"] = body.province_code
