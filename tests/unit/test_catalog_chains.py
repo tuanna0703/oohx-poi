@@ -48,3 +48,15 @@ def test_winmart_says_where_its_prices_come_from() -> None:
     assert e["brands"] == ["WinMart+", "WinMart"]
     assert region_note("HCM,HNI") == "TP.HCM, Hà Nội"
     assert region_note("*") is None
+
+
+def test_official_lists_are_complete_only_where_the_list_is_every_shop() -> None:
+    from poi_lake.services.catalog import official_entry, official_fields
+
+    assert [c.code for c in CHAINS.values() if c.official_complete] == ["pico", "nguyenkim"]
+    e = official_entry(CHAINS["nguyenkim"], 40, NOW)
+    assert official_fields(e) == {
+        "official_list": True, "official_complete": True, "official_stores": 40, "official_at": NOW,
+    }
+    assert not official_fields(official_entry(CHAINS["winmart"], 1659, NOW))["official_complete"]
+    assert official_fields(None)["official_list"] is False

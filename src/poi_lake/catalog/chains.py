@@ -16,6 +16,10 @@ class Chain:
     online_only: bool = False  # one price online, no store list (a virtual "online" store)
     site: str | None = None  # where its prices are read ("pico.vn"); None: no catalog
     per_store: bool = False  # prices differ by store (WinMart), not one online price
+    # Its store list (chain_stores) is every shop it has: a site may show
+    # only the masters matched to it. WinMart's lists only the stores that
+    # take online orders (~1,900 of ~4,300); Bách Hoá Xanh's is not refreshed.
+    official_complete: bool = False
 
 
 CHAINS: dict[str, Chain] = {
@@ -52,12 +56,12 @@ CHAINS: dict[str, Chain] = {
     # Pico's own stores come from the group's store list.
     "pico": Chain(
         "pico", "Pico", ("Pico",),
-        ("retail", "retail.electronics"), products=True, site="pico.vn",
+        ("retail", "retail.electronics"), products=True, site="pico.vn", official_complete=True,
     ),
     # Its stores too come from the group's store list (nguyenkim.com/store).
     "nguyenkim": Chain(
         "nguyenkim", "Nguyễn Kim", ("Nguyen Kim",),
-        ("retail", "retail.electronics"), products=True, site="nguyenkim.com",
+        ("retail", "retail.electronics"), products=True, site="nguyenkim.com", official_complete=True,
     ),
 }
 

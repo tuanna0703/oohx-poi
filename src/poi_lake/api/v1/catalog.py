@@ -5,7 +5,8 @@
   GET  /api/v1/master-pois/{id}/chain-stores   what each chain's own store list says
                                                about this master: hours, phone (read:master)
   GET  /api/v1/catalog/chains                  the chains with a catalog: label, site,
-                                               counts, last run, status (read:master)
+                                               counts, last run, status, official
+                                               store list (read:master)
   GET  /api/v1/catalog/{chain}/products        what the chain's stores list online,
                                                one row per product (read:master)
   GET  /api/v1/catalog/{chain}/stores          masters whose store lists products,
@@ -76,10 +77,15 @@ async def catalog_chains(session: AsyncSession = Depends(get_session)) -> dict[s
     counts = await catalog.chain_counts(session)
     now = datetime.now(UTC)
     region = catalog.region_note(get_settings().catalog_winmart_regions)
-    out = [
-        e for c in CHAINS.values()
-        if (e := catalog.chain_entry(c, counts.get(c.code), enabled=_enabled(c.code), now=now, region=region))
-    ]
+    official = await catalog.official_brands(session, CHAINS)
+    out = []
+    for c in CHAINS.values():
+        e = catalog.chain_entry(c, counts.get(c.code), enabled=_enabled(c.code), now=now, region=region)
+        if e:
+            mine = [official[b] for b in c.brands if official.get(b, {}).get("official_chain") == c.code]
+            o = {**mine[0], "official_stores": sum(x["official_stores"] for x in mine)} if mine else None
+            e.update(catalog.official_fields(o))
+            out.append(e)
     return {"chains": out}
 
 
