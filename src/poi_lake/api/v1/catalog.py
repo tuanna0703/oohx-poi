@@ -4,6 +4,8 @@
                                                lists online (read:master)
   GET  /api/v1/master-pois/{id}/chain-stores   what each chain's own store list says
                                                about this master: hours, phone (read:master)
+  GET  /api/v1/catalog/chains                  the chains with a catalog: label, site,
+                                               counts, last run, status (read:master)
   GET  /api/v1/catalog/{chain}/products        what the chain's stores list online,
                                                one row per product (read:master)
   GET  /api/v1/catalog/{chain}/stores          masters whose store lists products,
@@ -23,7 +25,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -32,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from poi_lake.api.deps import get_session, require_admin
 from poi_lake.catalog.chains import CHAINS, Chain
+from poi_lake.config import get_settings
 from poi_lake.db.models import IngestionJob, IngestionJobStatus, Source
 from poi_lake.services import catalog, catalog_brands
 from poi_lake.services.rate_limit import (
@@ -49,6 +52,35 @@ def _chain(chain: str) -> Chain:
     if found is None:
         raise HTTPException(404, f"unknown chain {chain!r}; known: {', '.join(CHAINS)}")
     return found
+
+
+def _enabled(code: str) -> bool:
+    """Whether the chain's catalog is still read (its CATALOG_*_ENABLED)."""
+    s = get_settings()
+    flags = {
+        "winmart": s.catalog_items_hours > 0,
+        "concung": s.catalog_concung_enabled,
+        "cellphones": s.catalog_cellphones_enabled,
+        "hoangha": s.catalog_hoangha_enabled,
+        "mediamart": s.catalog_mediamart_enabled,
+        "pico": s.catalog_picogroup_enabled,
+        "nguyenkim": s.catalog_picogroup_enabled,
+    }
+    return flags.get(code, False)
+
+
+@router.get("/catalog/chains", dependencies=[Depends(require_permission("read:master"))])
+async def catalog_chains(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    """The chains whose prices we read, once each has a first listing: what a
+    site needs to show one without knowing it beforehand."""
+    counts = await catalog.chain_counts(session)
+    now = datetime.now(UTC)
+    region = catalog.region_note(get_settings().catalog_winmart_regions)
+    out = [
+        e for c in CHAINS.values()
+        if (e := catalog.chain_entry(c, counts.get(c.code), enabled=_enabled(c.code), now=now, region=region))
+    ]
+    return {"chains": out}
 
 
 @router.get(

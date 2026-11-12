@@ -1043,3 +1043,71 @@ async def retire_unseen(
     ).rowcount
     await session.commit()
     return int(gone or 0)
+
+
+# A chain read daily whose newest listing is older than this is failing.
+STALE_AFTER = timedelta(hours=72)
+# The chain's own province codes (CATALOG_WINMART_REGIONS) as people say them.
+REGION_NAMES = {"HCM": "TP.HCM", "HNI": "Hà Nội", "HN": "Hà Nội", "DNG": "Đà Nẵng"}
+
+
+def region_note(codes: str) -> str | None:
+    """Where a per-store chain's prices come from ("HCM" → "TP.HCM"); None for all."""
+    parts = [c.strip().upper() for c in codes.split(",") if c.strip()]
+    if not parts or "*" in parts:
+        return None
+    return ", ".join(REGION_NAMES.get(c, c) for c in parts)
+
+
+def chain_entry(
+    chain: Any, counts: dict[str, Any] | None, *, enabled: bool, now: datetime, region: str | None = None
+) -> dict[str, Any] | None:
+    """One chain as ``GET /catalog/chains`` lists it; None until its catalog
+    has a first listing (or for a chain with no catalog)."""
+    if not chain.products or not chain.site or not counts or not counts.get("products"):
+        return None
+    last = counts.get("last_success_at")
+    if not enabled:
+        status = "disabled"
+    elif last is None or now - last > STALE_AFTER:
+        status = "failing"
+    else:
+        status = "ok"
+    return {
+        "code": chain.code,
+        "label": chain.label,
+        "site": chain.site,
+        "brand": chain.brands[0] if chain.brands else None,
+        "brands": list(chain.brands),
+        "per_store": chain.per_store,
+        "region_note": region if chain.per_store else None,
+        "products": int(counts["products"]),
+        "priced_products": int(counts.get("priced_products") or 0),
+        "stores": int(counts.get("stores") or 0),
+        "last_success_at": last,
+        "status": status,
+    }
+
+
+async def chain_counts(session: AsyncSession) -> dict[str, dict[str, Any]]:
+    """Per chain: products listed now, those with a price, active stores, and
+    when a listing was last written (the last run that saved prices)."""
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT l.chain, l.products, l.priced_products, l.last_success_at,
+                       (SELECT count(*) FROM chain_stores s WHERE s.chain = l.chain AND s.active) AS stores
+                FROM (
+                    SELECT chain,
+                           count(DISTINCT sku) AS products,
+                           count(DISTINCT sku) FILTER (WHERE coalesce(sale_price, price) IS NOT NULL)
+                               AS priced_products,
+                           max(seen_at) AS last_success_at
+                    FROM chain_store_products GROUP BY chain
+                ) l
+                """
+            )
+        )
+    ).mappings().all()
+    return {r["chain"]: dict(r) for r in rows}
