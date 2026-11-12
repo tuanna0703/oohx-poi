@@ -64,7 +64,9 @@ class BrandPlan:
         }
 
 
-def _carrier(name: str, aliases: list[str], pattern: str | None) -> Callable[[str | None], bool]:
+def _carrier(
+    name: str, aliases: list[str], pattern: str | None, pattern_only: bool = False
+) -> Callable[[str | None], bool]:
     rx = None
     if pattern:
         try:
@@ -75,7 +77,10 @@ def _carrier(name: str, aliases: list[str], pattern: str | None) -> Callable[[st
     def carries(store: str | None) -> bool:
         if not store:
             return False
-        return bool(rx and rx.search(store)) or brand_quality.carries(store, name, aliases)
+        if rx and rx.search(store):
+            return True
+        # A pattern-only brand's name alone does not make a store its ("Kim Nguyên").
+        return not (pattern_only and rx) and brand_quality.carries(store, name, aliases)
 
     return carries
 
@@ -90,7 +95,7 @@ async def build_plan(session: AsyncSession) -> list[BrandPlan]:
     dictionary = {
         r.name: r
         for r in (await session.execute(
-            text("SELECT name, aliases, match_pattern FROM brands WHERE enabled")
+            text("SELECT name, aliases, match_pattern, pattern_only FROM brands WHERE enabled")
         )).all()
     }
     verdicts = dict((await session.execute(text("SELECT brand, verdict FROM brand_quality"))).all())
@@ -114,7 +119,9 @@ async def build_plan(session: AsyncSession) -> list[BrandPlan]:
             continue
         aliases = list(entry.aliases or [])
         drop = brand_quality.partial_aliases(name, aliases) if verdicts.get(name) == "hide" else []
-        carries = _carrier(name, [a for a in aliases if a not in drop], entry.match_pattern)
+        carries = _carrier(
+            name, [a for a in aliases if a not in drop], entry.match_pattern, entry.pattern_only
+        )
         untag_rows = [r[0] for r in rows if not carries(r[1])]
         kept_members = {r[2] for r in rows if r[2] and carries(r[1])}
         untag_ms = [m[0] for m in ms if m[0] not in kept_members and not carries(m[1])]

@@ -8,6 +8,9 @@ Strategy:
      alias has two or more words of 3+ letters (``brand_quality.name_matches``,
      the rule the daily brand quality check uses). Any order for short words
      tagged "La Cà Phê" as Phê La and every "Nhà thuốc gia truyền".
+     A brand marked ``pattern_only`` skips this step: its name is also a
+     person's ("Nguyễn Kim" in "Nhà thuốc Nguyễn Thị Kim Anh", "Kim Nguyên"),
+     so only its regex, written for its shops' names, tags a store.
 
 Returns the canonical brand name + a confidence in [0, 1].
 """
@@ -41,6 +44,7 @@ class _CompiledBrand:
     aliases_folded: tuple[str, ...]
     pattern: re.Pattern[str] | None
     aliases: tuple[str, ...] = ()
+    pattern_only: bool = False  # only the regex tags it, never the aliases
 
 
 class BrandDetector:
@@ -82,7 +86,10 @@ class BrandDetector:
             )
             raw = tuple(dict.fromkeys(a for a in [row.name, *row.aliases] if a))
             compiled.append(
-                _CompiledBrand(name=row.name, aliases_folded=aliases, pattern=pattern, aliases=raw)
+                _CompiledBrand(
+                    name=row.name, aliases_folded=aliases, pattern=pattern, aliases=raw,
+                    pattern_only=bool(row.pattern_only) and pattern is not None,
+                )
             )
         self._brands = compiled
         self._loaded_at = time.monotonic()
@@ -106,6 +113,8 @@ class BrandDetector:
         if not folded:
             return None
         for b in self._brands:
+            if b.pattern_only:
+                continue
             for alias in b.aliases:
                 alias_words = words(alias).split()
                 # Reject 1-character alias words entirely — too noisy.

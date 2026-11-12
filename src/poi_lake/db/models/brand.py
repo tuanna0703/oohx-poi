@@ -21,6 +21,8 @@ class Brand(Base):
     parent_company: Mapped[str | None] = mapped_column(String(200))
     country: Mapped[str | None] = mapped_column(String(2))
     match_pattern: Mapped[str | None] = mapped_column(Text)
+    # Only ``match_pattern`` tags a store, never the name or aliases.
+    pattern_only: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
     def __repr__(self) -> str:
