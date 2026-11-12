@@ -54,9 +54,10 @@ CHAINS: dict[str, Chain] = {
         "pico", "Pico", ("Pico",),
         ("retail", "retail.electronics"), products=True, site="pico.vn",
     ),
+    # Its stores too come from the group's store list (nguyenkim.com/store).
     "nguyenkim": Chain(
         "nguyenkim", "Nguyễn Kim", ("Nguyen Kim",),
-        ("retail", "retail.electronics"), products=True, online_only=True, site="nguyenkim.com",
+        ("retail", "retail.electronics"), products=True, site="nguyenkim.com",
     ),
 }
 
@@ -78,4 +79,10 @@ def display_name(chain: str, name: str, address: str | None, store_type: str | N
         # "76 Nguyễn Trãi - HN" → "Điện máy Pico 76 Nguyễn Trãi"
         rest = re.sub(r"\s+-\s+[A-Z]{2,3}$", "", name).strip()
         return f"Điện máy Pico {rest or street}".strip()
+    if chain == "nguyenkim":
+        # "TTMS SBS Nguyễn Kim Dĩ An", "CTY MTV Cần Thơ", "TTMS NK Nguyễn Duy
+        # Trinh" → "Nguyễn Kim Dĩ An", "Nguyễn Kim Cần Thơ", "Nguyễn Kim Nguyễn Duy Trinh"
+        rest = re.sub(r"^(?:TTMS(?:\s*&\s*Giải trí)?|SIS|CTY\s+MTV)\s+(?:SBS\s+)?", "", name.strip())
+        rest = re.sub(r"^(?:Nguyễn\s+Kim|NK)\s+", "", rest).strip()
+        return f"Nguyễn Kim {rest or street}".strip()
     return name

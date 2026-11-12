@@ -77,7 +77,17 @@ def test_pico_stores_get_the_brand_in_their_name() -> None:
 
 def test_the_chains_are_registered() -> None:
     assert CHAINS["pico"].products and not CHAINS["pico"].online_only, "Pico has a store list"
-    assert CHAINS["nguyenkim"].online_only and CHAINS["nguyenkim"].brands == ("Nguyen Kim",)
+    assert not CHAINS["nguyenkim"].online_only and CHAINS["nguyenkim"].brands == ("Nguyen Kim",)
+    names = {
+        "TTMS SBS Nguyễn Kim Dĩ An": "Nguyễn Kim Dĩ An",
+        "CTY MTV Cần Thơ": "Nguyễn Kim Cần Thơ",
+        "TTMS NK Nguyễn Duy Trinh": "Nguyễn Kim Nguyễn Duy Trinh",
+        "TTMS & Giải trí Sài Gòn Mall": "Nguyễn Kim Sài Gòn Mall",
+        "SIS Nguyễn Kim Thăng Long": "Nguyễn Kim Thăng Long",
+        "TTMS Sài Gòn": "Nguyễn Kim Sài Gòn",
+    }
+    for raw, shown in names.items():
+        assert display_name("nguyenkim", raw, "x", "center") == shown
 
 
 async def test_client_reads_the_assortment_brands_and_stores() -> None:
@@ -98,7 +108,16 @@ async def test_client_reads_the_assortment_brands_and_stores() -> None:
             return httpx.Response(200, text=f'<script type="application/ld+json">{json.dumps(ld)}</script>')
         if req.url.host == "ecommerce.pico.vn":
             return httpx.Response(200, json={"data": [
-                {"code": "SG01", "legalEntityCode": "NK", "status": 1, "lat": 10.7, "lng": 106.6},
+                {"code": "SG01", "name": {"vi": "TTMS Sài Gòn"}, "legalEntityCode": "NK", "status": 1,
+                 "lat": 10.7, "lng": 106.6, "fullAddress": "63 - 65 - 67 Trần Hưng Đạo, Bến Thành"},
+                {"code": "A008", "name": {"vi": "Trung tâm Dịch vụ Hậu mãi"}, "legalEntityCode": "NK", "status": 1,
+                 "lat": 10.7, "lng": 106.6, "fullAddress": "63 - 65 - 67, Trần Hưng Đạo, Bến Thành"},
+                {"code": "DC04", "name": {"vi": "TT KV HM Nguyễn Kim Hà Nội"}, "legalEntityCode": "NK",
+                 "status": 1, "lat": 21.0, "lng": 105.9, "fullAddress": "Lô C1, kho TNL"},
+                {"code": "HN01N", "name": {"vi": "TTMS Nguyễn Kim Tràng Thi"}, "legalEntityCode": "NK",
+                 "status": 1, "lat": 21.02, "lng": 105.84, "fullAddress": "10B Tràng Thi, Hoàn Kiếm, Hà Nội"},
+                {"code": "HN03", "name": {"vi": "TTMS Nguyễn Kim Tràng Thi (10B)"}, "legalEntityCode": "NK",
+                 "status": 1, "lat": 21.02, "lng": 105.84, "fullAddress": "10B  Tràng Thi, Hoàn Kiếm, Hà Nội"},
                 {"code": "XT", "name": {"vi": "173 Xuân Thủy - HN"}, "legalEntityCode": "PICO", "status": 1,
                  "lat": 21.03, "lng": 105.78},
             ]})
@@ -114,6 +133,9 @@ async def test_client_reads_the_assortment_brands_and_stores() -> None:
     async with PicoGroupClient(SITES["pico"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
                                min_interval_s=0) as pg:
         assert [s.code for s in await pg.stores()] == ["XT"], "Pico's own locations only"
+    async with PicoGroupClient(SITES["nguyenkim"], client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                               min_interval_s=0) as pg:
+        assert [s.code for s in await pg.stores()] == ["SG01", "HN01N"], "shops only, each once"
     assert seen[:2] == [
         "catalog.pico.vn/user/api/products?page=1&limit=100",
         "catalog.pico.vn/user/api/products?page=2&limit=100",

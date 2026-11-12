@@ -14,13 +14,15 @@ hosts have no robots.txt):
     price, selling price, stock, picture, page slug. Every product, daily.
   * the product page, once per product code, for its brand (the API carries
     no brand): the JSON-LD ``brand``. A code's brand serves both chains.
-  * ``ecommerce.pico.vn/user/api/store`` (what pico.vn/store loads): the
-    group's locations; Pico's own are those of legal entity ``PICO``.
+  * ``ecommerce.pico.vn/user/api/store`` (what pico.vn/store and
+    nguyenkim.com/store load): the group's locations; each chain's own are
+    those of its legal entity (``PICO``, ``NK``), less service centres.
 
 Prices: ``price`` is the list price, ``salePrice`` what it sells at. The
 API's ``finalPrice`` folds in hour-long flash sales and coupons and is the
 same whatever the chain, while the two sites show different promotional
 prices for one product: we keep the selling price, as both price it.
+Both chains also have shops, matched to masters; prices stay at ``ONLINE_STORE``.
 
 We keep facts and the URL of the product's picture on the group's CDN, never
 the picture (the operator's decision, 2026-11-09). Used goods, warranty
@@ -77,6 +79,9 @@ _USED_NAME = re.compile(r"(?:^|[\s(\[-])cũ(?:$|[\s)\]-])", re.I)
 _CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _IMAGE = re.compile(r"^https://cdn\.(?:pico\.vn|nguyenkimmall\.com)/\S+$")
+# Locations on the store list that sell nothing: after-sales and regional
+# service/warehouse centres ("Trung tâm Dịch vụ Hậu mãi", "TT KV HM Nguyễn Kim Hà Nội").
+_NOT_A_SHOP = re.compile(r"hậu\s*mãi|\bKV\s*HM\b|\bKVHM\b", re.I)
 _LD_JSON = re.compile(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.S)
 
 
@@ -254,9 +259,17 @@ class PicoGroupClient:
         except (ValueError, KeyError, TypeError) as exc:
             raise CatalogError(f"stores: {exc}") from exc
         out = []
+        addresses: set[str] = set()
         for d in rows if isinstance(rows, list) else []:
             if isinstance(d, dict) and d.get("legalEntityCode") == self.site.legal_entity and d.get("status") == 1:
                 s = parse_store(d)
-                if s:
-                    out.append(s)
+                if not s or _NOT_A_SHOP.search(s.name):
+                    continue
+                # One shop listed twice ("TTMS Nguyễn Kim Tràng Thi" and "… (10B)"):
+                # the first entry only.
+                key = " ".join(s.address.lower().split())
+                if key and key in addresses:
+                    continue
+                addresses.add(key)
+                out.append(s)
         return out
