@@ -14,12 +14,14 @@ class Chain:
     category: tuple[str, str]  # OpenOOH (top, sub) for a store we add
     products: bool  # whether we read what each store lists online
     online_only: bool = False  # one price online, no store list (a virtual "online" store)
+    site: str | None = None  # where its prices are read ("pico.vn"); None: no catalog
+    per_store: bool = False  # prices differ by store (WinMart), not one online price
 
 
 CHAINS: dict[str, Chain] = {
     "winmart": Chain(
         "winmart", "WinMart", ("WinMart+", "WinMart"),
-        ("retail", "retail.convenience_stores"), products=True,
+        ("retail", "retail.convenience_stores"), products=True, site="winmart.vn", per_store=True,
     ),
     "bachhoaxanh": Chain(
         "bachhoaxanh", "Bách Hoá Xanh", ("Bach Hoa Xanh",),
@@ -29,32 +31,32 @@ CHAINS: dict[str, Chain] = {
     # store list, no store matched to a master.
     "concung": Chain(
         "concung", "Con Cưng", ("Con Cưng",),
-        ("retail", "retail.mother_baby"), products=True, online_only=True,
+        ("retail", "retail.mother_baby"), products=True, online_only=True, site="concung.com",
     ),
     # One online price across the chain (catalog/cellphones.py).
     "cellphones": Chain(
         "cellphones", "CellphoneS", ("CellphoneS",),
-        ("retail", "retail.electronics"), products=True, online_only=True,
+        ("retail", "retail.electronics"), products=True, online_only=True, site="cellphones.com.vn",
     ),
     # One online price across the chain (catalog/hoangha.py).
     "hoangha": Chain(
         "hoangha", "Hoàng Hà Mobile", ("Hoàng Hà Mobile",),
-        ("retail", "retail.electronics"), products=True, online_only=True,
+        ("retail", "retail.electronics"), products=True, online_only=True, site="hoanghamobile.com",
     ),
     # One online price across the chain (catalog/mediamart.py).
     "mediamart": Chain(
         "mediamart", "MediaMart", ("MediaMart",),
-        ("retail", "retail.electronics"), products=True, online_only=True,
+        ("retail", "retail.electronics"), products=True, online_only=True, site="mediamart.vn",
     ),
     # One online price across the chain, at a virtual store (catalog/picogroup.py);
     # Pico's own stores come from the group's store list.
     "pico": Chain(
         "pico", "Pico", ("Pico",),
-        ("retail", "retail.electronics"), products=True,
+        ("retail", "retail.electronics"), products=True, site="pico.vn",
     ),
     "nguyenkim": Chain(
         "nguyenkim", "Nguyễn Kim", ("Nguyen Kim",),
-        ("retail", "retail.electronics"), products=True, online_only=True,
+        ("retail", "retail.electronics"), products=True, online_only=True, site="nguyenkim.com",
     ),
 }
 
