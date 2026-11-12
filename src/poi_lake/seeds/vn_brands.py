@@ -78,7 +78,13 @@ BRANDS: list[BrandRow] = [
     {"name": "Thegioididong", "aliases": ["Thế Giới Di Động", "The Gioi Di Dong", "TGDĐ"], "category": "retail", "parent_company": "Mobile World", "country": "VN", "match_pattern": r"\bth[eế]\s*gi[oớ]i\s*di\s*đ[oộ]ng\b|\btgd[đd]\b|\bthegioididong\b"},
     {"name": "FPT Shop", "aliases": ["FPTShop"], "category": "retail", "parent_company": "FPT Retail", "country": "VN", "match_pattern": r"\bfpt\s*shop\b"},
     {"name": "Dien May Xanh", "aliases": ["Điện Máy Xanh", "DMX"], "category": "retail", "parent_company": "Mobile World", "country": "VN", "match_pattern": r"\bđi[eệ]n\s*m[aá]y\s*xanh\b|\bdmx\b"},
-    {"name": "Nguyen Kim", "aliases": ["Nguyễn Kim"], "category": "retail", "parent_company": "Central Retail", "country": "VN", "match_pattern": r"\bnguy[eễ]n\s*kim\b"},
+    {"name": "Nguyen Kim", "aliases": ["Nguyễn Kim"], "category": "retail", "parent_company": "Central Retail", "country": "VN", "pattern_only": True,
+     # Its shops' names only; kept in step with migration 20261112_0018.
+     "match_pattern": (
+         r"^\s*(?:(?:trung\s*t[âa]m(?:\s*mua\s*s[ắa]m)?|tttm|ttms(?:\s*&\s*gi[ảa]i\s*tr[íi])?"
+         r"|si[êe]u\s*th[ịi]|sis)\s*)?(?:sbs\s*)?(?:đi[ệe]n\s*m[áa]y\s*)?[-–:]?\s*"
+         r"(?:nguy[ễe]n\s*kim|nguyenkim)\b"
+     )},
     {"name": "Pico", "aliases": ["Điện máy Pico", "Siêu thị điện máy Pico"], "category": "retail", "parent_company": "Pico", "country": "VN", "match_pattern": r"\b(?:đi[eệ]n\s*m[aá]y|si[eê]u\s*th[iị](?:\s*đi[eệ]n\s*m[aá]y)?)\s*pico\b"},
     {"name": "CellphoneS", "aliases": ["Cellphone S", "cellphones"], "category": "retail", "parent_company": "CellphoneS", "country": "VN", "match_pattern": r"\bcellphones\b"},
     {"name": "Phong Vu", "aliases": ["Phong Vũ"], "category": "retail", "parent_company": "Phong Vu", "country": "VN", "match_pattern": r"\bphong\s*v[uũ]\b"},

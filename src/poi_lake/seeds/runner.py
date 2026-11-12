@@ -80,14 +80,16 @@ async def seed_openooh_categories(session: AsyncSession) -> int:
 async def seed_brands(session: AsyncSession) -> int:
     sql = text(
         """
-        INSERT INTO brands (name, aliases, category, parent_company, country, match_pattern, enabled)
-        VALUES (:name, CAST(:aliases AS TEXT[]), :category, :parent_company, :country, :match_pattern, true)
+        INSERT INTO brands (name, aliases, category, parent_company, country, match_pattern, pattern_only, enabled)
+        VALUES (:name, CAST(:aliases AS TEXT[]), :category, :parent_company, :country, :match_pattern,
+                :pattern_only, true)
         ON CONFLICT (name) DO UPDATE SET
             aliases = EXCLUDED.aliases,
             category = EXCLUDED.category,
             parent_company = EXCLUDED.parent_company,
             country = EXCLUDED.country,
-            match_pattern = EXCLUDED.match_pattern
+            match_pattern = EXCLUDED.match_pattern,
+            pattern_only = EXCLUDED.pattern_only
         """
     )
     for row in BRANDS:
@@ -100,6 +102,7 @@ async def seed_brands(session: AsyncSession) -> int:
                 "parent_company": row["parent_company"],
                 "country": row["country"],
                 "match_pattern": row["match_pattern"],
+                "pattern_only": bool(row.get("pattern_only", False)),
             },
         )
     await session.commit()
