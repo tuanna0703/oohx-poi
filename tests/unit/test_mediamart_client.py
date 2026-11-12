@@ -97,7 +97,9 @@ def test_cards_prices_and_skips() -> None:
     assert (ip.item_no, ip.brand, ip.menu, ip.seo_name, ip.name) == (
         "28314", "Apple", "Smartphones", "smartphones/apple-iphone-17-256gb-den", "Apple iPhone 17 256GB (Đen)",
     )
-    assert ip.image_url == "https://cdn.mediamart.vn/images/product/28314.webp", "a URL, not the image"
+    assert ip.image_url == "https://cdn.mediamart.vn/images/product/28314.jpg", (
+        "a URL, not the image: the uploaded picture, not the WebP rendition the CDN may lack"
+    )
     assert (items[1].price, items[1].sale_price) == (26990000.0, None)
 
 
