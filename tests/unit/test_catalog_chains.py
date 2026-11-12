@@ -30,6 +30,7 @@ def test_an_entry() -> None:
     )
     assert (e["products"], e["priced_products"], e["stores"], e["status"]) == (5285, 1954, 4, "ok")
     assert e["region_note"] is None
+    assert e["category"] == "retail.electronics"
 
 
 def test_status_and_who_is_left_out() -> None:

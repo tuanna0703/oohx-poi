@@ -1079,6 +1079,7 @@ def chain_entry(
         "site": chain.site,
         "brand": chain.brands[0] if chain.brands else None,
         "brands": list(chain.brands),
+        "category": chain.category[1],  # OpenOOH code of the stores we add ("retail.electronics")
         "per_store": chain.per_store,
         "region_note": region if chain.per_store else None,
         "products": int(counts["products"]),
