@@ -1,6 +1,9 @@
 """Spatial lookup: (lat, lng) → (province_code, district_code, ward_code).
 
-Bbox-based approximation. We don't carry full polygons because:
+``ward_code`` is the 2025 ward the point is in, from the wards' boundaries
+(``services/admin_wards``). Province and district: a bbox-based
+approximation, of the 63 provinces and their districts of before 2025;
+for those we don't carry full polygons because:
 
   * Bboxes are enough for stamping a POI with its containing province /
     district. Points near a province border may pick the neighbour, but
@@ -21,6 +24,8 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from poi_lake.services.admin_wards import WARD_AT_SQL
 
 
 @dataclass(slots=True, frozen=True)
@@ -43,13 +48,13 @@ _LOOKUP_SQL = text(
     SELECT
       (SELECT code FROM matches WHERE level = 1 ORDER BY area ASC LIMIT 1) AS province_code,
       (SELECT code FROM matches WHERE level = 2 ORDER BY area ASC LIMIT 1) AS district_code,
-      (SELECT code FROM matches WHERE level = 3 ORDER BY area ASC LIMIT 1) AS ward_code
+      (""" + WARD_AT_SQL + """) AS ward_code
     """
 )
 
 
 async def lookup_admin(session: AsyncSession, lat: float, lng: float) -> AdminLookup:
-    """Return the smallest-bbox admin unit per level containing the point."""
+    """The smallest-bbox province and district containing the point, and its ward."""
     row = (
         await session.execute(_LOOKUP_SQL, {"lat": float(lat), "lng": float(lng)})
     ).one()
