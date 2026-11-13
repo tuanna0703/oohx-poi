@@ -35,7 +35,7 @@ def _batch_sql(table: str, key: str, key_type: str, dry_run: bool) -> str:
       WITH batch AS (
         SELECT t.{key} AS k, {_WARD} AS ward
           FROM {table} t
-         WHERE t.{key} > CAST(:after AS {key_type})
+         WHERE t.{key} > CAST(CAST(:after AS text) AS {key_type})
          ORDER BY t.{key} LIMIT :n
       )
     """
