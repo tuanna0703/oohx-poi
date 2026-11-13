@@ -43,6 +43,11 @@ services:
     restart: always
 
   api:
+    logging: &logging
+      # Rotate: a container's log is otherwise never cut (caddy's reached
+      # 1.4 GB), and a full disk killed the scraper on 2026-11-07.
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
     environment:
       APP_ENV: production
       APP_LOG_LEVEL: INFO
@@ -60,6 +65,7 @@ services:
     restart: always
 
   worker:
+    logging: *logging
     environment:
       APP_ENV: production
       APP_LOG_LEVEL: INFO
@@ -82,6 +88,7 @@ services:
     restart: always
 
   catalog:
+    logging: *logging
     environment:
       APP_ENV: production
       APP_LOG_LEVEL: INFO
@@ -93,6 +100,7 @@ services:
     restart: always
 
   admin:
+    logging: *logging
     environment:
       APP_ENV: production
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-poi}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-poi_lake}
@@ -103,6 +111,7 @@ services:
     restart: always
 
   gosom-scraper:
+    logging: *logging
     deploy:
       resources:
         limits: { cpus: "1.0", memory: 1G }
