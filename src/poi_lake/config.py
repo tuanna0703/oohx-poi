@@ -117,6 +117,14 @@ class Settings(BaseSettings):
     # are each re-read about once a week.
     catalog_cellphones_pages: int = Field(default=5000, alias="CATALOG_CELLPHONES_PAGES")
     catalog_cellphones_minutes: int = Field(default=180, alias="CATALOG_CELLPHONES_MINUTES")
+    # Hasaki's online prices (hasaki.vn product pages); the operator's
+    # decision (2026-11-14), knowing its terms restrict commercial use of its
+    # material. ~7,500 pages of goods on sale, ~95 KB each: all of them each
+    # day within the caps. Set false to stop.
+    catalog_hasaki_enabled: bool = Field(default=True, alias="CATALOG_HASAKI_ENABLED")
+    catalog_hasaki_interval_s: float = Field(default=1.0, alias="CATALOG_HASAKI_INTERVAL_S")
+    catalog_hasaki_pages: int = Field(default=9000, alias="CATALOG_HASAKI_PAGES")
+    catalog_hasaki_minutes: int = Field(default=200, alias="CATALOG_HASAKI_MINUTES")
     # Hoàng Hà Mobile's online prices (hoanghamobile.com category pages),
     # read daily; the operator's decision (2026-11-09). Set false to stop.
     catalog_hoangha_enabled: bool = Field(default=True, alias="CATALOG_HOANGHA_ENABLED")

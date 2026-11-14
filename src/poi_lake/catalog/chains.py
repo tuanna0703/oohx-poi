@@ -42,6 +42,11 @@ CHAINS: dict[str, Chain] = {
         "cellphones", "CellphoneS", ("CellphoneS",),
         ("retail", "retail.electronics"), products=True, online_only=True, site="cellphones.com.vn",
     ),
+    # One online price across the chain (catalog/hasaki.py).
+    "hasaki": Chain(
+        "hasaki", "Hasaki", ("Hasaki",),
+        ("retail", "retail.cosmetics"), products=True, online_only=True, site="hasaki.vn",
+    ),
     # One online price across the chain (catalog/hoangha.py).
     "hoangha": Chain(
         "hoangha", "Hoàng Hà Mobile", ("Hoàng Hà Mobile",),

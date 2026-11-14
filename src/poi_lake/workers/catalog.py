@@ -9,7 +9,8 @@ chain has no product crawl. ``refresh_concung`` reads Con Cưng's online prices
 (its category pages) into one virtual store; off unless
 ``CATALOG_CONCUNG_ENABLED``. ``refresh_cellphones`` reads part of
 CellphoneS's product pages each day into its virtual store, the pages read
-longest ago first. ``refresh_hoangha`` reads Hoàng Hà Mobile's category pages
+longest ago first; ``refresh_hasaki`` reads Hasaki's the same way.
+``refresh_hoangha`` reads Hoàng Hà Mobile's category pages
 (and their brand pages) daily into its virtual store; ``refresh_mediamart``
 reads MediaMart's category listings (and their brand filters) the same way.
 ``refresh_picogroup`` reads Pico's or Nguyễn Kim's whole assortment from the
@@ -32,7 +33,7 @@ from zoneinfo import ZoneInfo
 import dramatiq
 from sqlalchemy import text
 
-from poi_lake.catalog import bachhoaxanh, cellphones, concung, hoangha, mediamart, picogroup
+from poi_lake.catalog import bachhoaxanh, cellphones, concung, hasaki, hoangha, mediamart, picogroup
 from poi_lake.catalog.base import CatalogError, CatalogTransientError
 from poi_lake.catalog.chains import CHAINS
 from poi_lake.catalog.winmart import CHAIN, WinMartClient
@@ -300,59 +301,89 @@ def refresh_cellphones() -> None:
 
 
 async def _refresh_cellphones() -> dict:
-    """Up to ``CATALOG_CELLPHONES_PAGES`` product pages, for at most
-    ``CATALOG_CELLPHONES_MINUTES``, at the virtual online store.
+    settings = get_settings()
+    return await _refresh_product_pages(
+        cellphones,
+        cellphones.CellphoneSClient(min_interval_s=settings.catalog_cellphones_interval_s),
+        pages=settings.catalog_cellphones_pages,
+        minutes=settings.catalog_cellphones_minutes,
+    )
+
+
+@dramatiq.actor(queue_name="catalog", max_retries=0, time_limit=4 * 3600_000)
+def refresh_hasaki() -> None:
+    result = _run(_refresh_hasaki)
+    logger.info("hasaki refresh: %r", result)
+
+
+async def _refresh_hasaki() -> dict:
+    settings = get_settings()
+    return await _refresh_product_pages(
+        hasaki,
+        hasaki.HasakiClient(min_interval_s=settings.catalog_hasaki_interval_s),
+        pages=settings.catalog_hasaki_pages,
+        minutes=settings.catalog_hasaki_minutes,
+    )
+
+
+async def _refresh_product_pages(site: Any, client: Any, *, pages: int, minutes: int) -> dict:
+    """Up to ``pages`` product pages of a chain read page by page
+    (CellphoneS's, Hasaki's), for at most ``minutes``, at its virtual online
+    store, the pages read longest ago first.
+
+    ``site`` is the chain's module (``CHAIN``, ``sku_of``, ``GoneError``)
+    and ``client`` its client (``products()``, ``product(slug)``).
 
     A page with a price lists the product; a page with none (out of stock,
     "contact us") or gone takes it off the listing; a product the sitemaps no
     longer list leaves it too, when every sitemap file was read."""
-    settings = get_settings()
+    chain = site.CHAIN
     now = datetime.now(UTC)
-    deadline = now + timedelta(minutes=settings.catalog_cellphones_minutes)
-    label = CHAINS[cellphones.CHAIN].label
+    deadline = now + timedelta(minutes=minutes)
+    label = CHAINS[chain].label
     async with session_scope() as s:
-        store = await catalog.ensure_online_store(s, cellphones.CHAIN, label)
-        read = await catalog.read_times(s, cellphones.CHAIN)
+        store = await catalog.ensure_online_store(s, chain, label)
+        read = await catalog.read_times(s, chain)
     stats = {"products": 0, "read": 0, "listed": 0, "unpriced": 0, "gone": 0, "skipped": 0,
              "failed": 0, "removed": 0}
-    async with cellphones.CellphoneSClient(min_interval_s=settings.catalog_cellphones_interval_s) as cp:
+    async with client as cp:
         slugs, whole = await cp.products()
         stats["products"] = len(slugs)
-        listed: dict[str, cellphones.Item] = {}
-        unpriced: dict[str, cellphones.Item] = {}
+        listed: dict[str, Any] = {}
+        unpriced: dict[str, Any] = {}
         gone: list[str] = []
         failures = 0
 
         async def save() -> None:
             async with session_scope() as s:
                 if unpriced:
-                    await catalog.save_products(s, cellphones.CHAIN, list(unpriced.values()), now=now)
+                    await catalog.save_products(s, chain, list(unpriced.values()), now=now)
                 stats["removed"] += await catalog.retire_skus(
-                    s, cellphones.CHAIN, store, now=now, skus=[*gone, *unpriced]
+                    s, chain, store, now=now, skus=[*gone, *unpriced]
                 )
                 await s.commit()
                 saved = await catalog.save_items(
-                    s, cellphones.CHAIN, store, list(listed.values()), answered_menus=[], now=now
+                    s, chain, store, list(listed.values()), answered_menus=[], now=now
                 )
             stats["listed"] += saved["items"]
             listed.clear()
             unpriced.clear()
             gone.clear()
 
-        for slug in cellphones_order(slugs, read)[: settings.catalog_cellphones_pages]:
+        for slug in cellphones_order(slugs, read)[:pages]:
             if datetime.now(UTC) >= deadline:
                 stats["stopped"] = "time"
                 break
             try:
                 it = await cp.product(slug)
-            except cellphones.GoneError:
-                gone.append(cellphones.sku_of(slug))
+            except site.GoneError:
+                gone.append(site.sku_of(slug))
                 stats["gone"] += 1
                 continue
-            except cellphones.CatalogError as exc:  # transient errors included
+            except CatalogError as exc:  # transient errors included
                 stats["failed"] += 1
                 failures += 1
-                logger.info("cellphones %s: %s", slug, exc)
+                logger.info("%s %s: %s", chain, slug, exc)
                 if failures >= CELLPHONES_MAX_FAILURES:
                     stats["stopped"] = f"{failures} pages failed in a row"
                     break
@@ -360,8 +391,8 @@ async def _refresh_cellphones() -> dict:
             failures = 0
             stats["read"] += 1
             if it is None:
-                stats["skipped"] += 1  # used goods, or no product on the page
-                gone.append(cellphones.sku_of(slug))
+                stats["skipped"] += 1  # used goods, a gift, or no product on the page
+                gone.append(site.sku_of(slug))
             elif it.price is None:
                 stats["unpriced"] += 1
                 unpriced[it.sku] = it
@@ -375,7 +406,7 @@ async def _refresh_cellphones() -> dict:
         if whole and slugs and len(slugs) >= CELLPHONES_SITEMAP_SHARE * len(read):
             async with session_scope() as s:
                 stats["removed"] += await catalog.retire_skus(
-                    s, cellphones.CHAIN, store, now=now, keep_only=[cellphones.sku_of(x) for x in slugs]
+                    s, chain, store, now=now, keep_only=[site.sku_of(x) for x in slugs]
                 )
                 await s.commit()
         stats["sitemaps_whole"] = whole
