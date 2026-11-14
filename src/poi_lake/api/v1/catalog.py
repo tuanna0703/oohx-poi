@@ -62,6 +62,7 @@ def _enabled(code: str) -> bool:
         "winmart": s.catalog_items_hours > 0,
         "concung": s.catalog_concung_enabled,
         "cellphones": s.catalog_cellphones_enabled,
+        "hasaki": s.catalog_hasaki_enabled,
         "hoangha": s.catalog_hoangha_enabled,
         "mediamart": s.catalog_mediamart_enabled,
         "pico": s.catalog_picogroup_enabled,
@@ -220,6 +221,7 @@ async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> 
         refresh_bachhoaxanh,
         refresh_cellphones,
         refresh_concung,
+        refresh_hasaki,
         refresh_hoangha,
         refresh_mediamart,
         refresh_picogroup,
@@ -232,6 +234,8 @@ async def chain_refresh(chain: str, crawl_items: bool = Query(default=True)) -> 
         refresh_concung.send()  # on demand, whatever CATALOG_CONCUNG_ENABLED says
     elif c.code == "cellphones":
         refresh_cellphones.send()
+    elif c.code == "hasaki":
+        refresh_hasaki.send()
     elif c.code == "hoangha":
         refresh_hoangha.send()
     elif c.code == "mediamart":

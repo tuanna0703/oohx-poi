@@ -196,6 +196,7 @@ def _start_catalog_scheduler() -> None:
                 refresh_bachhoaxanh,
                 refresh_cellphones,
                 refresh_concung,
+                refresh_hasaki,
                 refresh_hoangha,
                 refresh_mediamart,
                 refresh_picogroup,
@@ -225,6 +226,11 @@ def _start_catalog_scheduler() -> None:
                 if r.set(f"poi-lake:scheduler:cellphones:{cday}", "1", ex=2 * 86400, nx=True):
                     refresh_cellphones.send()
                     logger.info("scheduled cellphones refresh enqueued (%s)", cday)
+            if settings.catalog_hasaki_enabled:
+                cday = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
+                if r.set(f"poi-lake:scheduler:hasaki:{cday}", "1", ex=2 * 86400, nx=True):
+                    refresh_hasaki.send()
+                    logger.info("scheduled hasaki refresh enqueued (%s)", cday)
             if settings.catalog_hoangha_enabled:
                 cday = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
                 if r.set(f"poi-lake:scheduler:hoangha:{cday}", "1", ex=2 * 86400, nx=True):
